@@ -12,7 +12,7 @@ class Transaction extends Model
     protected $fillable = [
         'wallet_id', 'user_id', 'category_id', 'amount',
         'type', 'description', 'receipt_image_path',
-        'ai_metadata', 'transaction_date'
+        'ai_metadata', 'transaction_date', 'purchased_at','payment_method',
     ];
 
     protected function casts(): array
@@ -20,6 +20,7 @@ class Transaction extends Model
         return [
             'ai_metadata' => 'array',
             'transaction_date' => 'datetime',
+            'purchased_at' => 'datetime',
         ];
     }
 

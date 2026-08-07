@@ -1,0 +1,13 @@
+[90m= [39m[34;4mApp\Models\User[39;24m {#9034
+    [34mid[39m: [35m1[39m,
+    [34mtelegram_id[39m: [35m315139689[39m,
+    [34mname[39m: [32m"[39m[32mBR[39m[32m"[39m,
+    [34memail[39m: [32m"[39m[32m315139689@telegram.bot[39m[32m"[39m,
+    [34memail_verified_at[39m: [36mnull[39m,
+    #[33mpassword[39m: [32m"[39m\$[32m2y[39m\$[32m12[39m\$[32mYdZXccvzUk4mMlY2zYOZcelxdMb.d.PJlDZTkhbM6eIsnQwpcZEfy[39m[32m"[39m,
+    [34msettings[39m: [36mnull[39m,
+    #[33mremember_token[39m: [36mnull[39m,
+    [34mcreated_at[39m: [32m"[39m[32m2026-08-05 19:33:35[39m[32m"[39m,
+    [34mupdated_at[39m: [32m"[39m[32m2026-08-05 19:35:41[39m[32m"[39m,
+    [34mcurrent_wallet_id[39m: [36mnull[39m,
+  }

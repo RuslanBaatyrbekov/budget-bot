@@ -81,6 +81,24 @@ class TransactionResource extends Resource
                     ->dateTime()
                     ->sortable()
                     ->toggleable(isToggledHiddenByDefault: true),
+                Tables\Columns\TextColumn::make('payment_method')
+                    ->label('Оплата')
+                    ->badge()
+                    ->formatStateUsing(fn (string $state): string => match ($state) {
+                        'cash' => 'Наличные',
+                        'card' => 'Карта',
+                        default => 'Неизвестно',
+                    })
+                    ->color(fn (string $state): string => match ($state) {
+                        'cash' => 'success',
+                        'card' => 'info',
+                        default => 'gray',
+                    })
+                    ->icon(fn (string $state): string => match ($state) {
+                        'cash' => 'heroicon-m-banknotes',
+                        'card' => 'heroicon-m-credit-card',
+                        default => 'heroicon-m-question-mark-circle',
+                    }),
             ])
             ->filters([
                 //

@@ -5,6 +5,7 @@ namespace App\Webhooks;
 use App\Models\User;
 use App\Models\Wallet;
 use App\Models\Category;
+use App\Models\Transaction;
 use DefStudio\Telegraph\Handlers\WebhookHandler;
 use DefStudio\Telegraph\Keyboard\Button;
 use DefStudio\Telegraph\Keyboard\Keyboard;
@@ -12,16 +13,17 @@ use Illuminate\Support\Str;
 use Illuminate\Support\Stringable;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\DB;
-
+use Illuminate\Support\Carbon;
 
 class BudgetBotHandler extends WebhookHandler
 {
     public function start(): void
     {
-        $telegramId =$this->message?->from()?->id();
-        $firstName =$this->message?->from()?->firstName() ?? 'Пользователь';
+        $telegramId = $this->message?->from()?->id();
+        $firstName = $this->message?->from()?->firstName() ?? 'Пользователь';
 
-        if (!$telegramId) {$this->chat->html("Упс, не смог получить твой Telegram ID.")->send();
+        if (!$telegramId) {
+            $this->chat->html("Упс, не смог получить твой Telegram ID.")->send();
             return;
         }
 
@@ -34,9 +36,10 @@ class BudgetBotHandler extends WebhookHandler
             ]
         );
 
-        if (!$user->current_wallet_id) {$wallet = Wallet::create(['name' => 'Семейный бюджет']);
+        if (!$user->current_wallet_id) {
+            $wallet = Wallet::create(['name' => 'Семейный бюджет']);
             $user->wallets()->attach($wallet->id, ['role' => 'owner']);
-            $user->current_wallet_id =$wallet->id;
+            $user->current_wallet_id = $wallet->id;
             $user->save();
 
             $defaultCategories = [
@@ -47,26 +50,27 @@ class BudgetBotHandler extends WebhookHandler
                 ['name' => 'Зарплата', 'icon' => '💵', 'type' => 'income'],
             ];
 
-            foreach ($defaultCategories as$category) {
+            foreach ($defaultCategories as $category) {
                 $wallet->categories()->create($category);
             }
         }
 
-        $this->chat->html("Привет, <b>{$firstName}</b>! 👋\n\nЯ настроил твой персональный кошелек. Теперь ты можешь отправить мне текст (например, <code>1500.50 глово</code>) или фото чека!")->send();
+        $this->chat->html("Привет, <b>{$firstName}</b>! 👋\n\nОтправь мне текст (например, <code>1500 глово</code>) или фото чека.")->send();
     }
 
     protected function handleMessage(): void
     {
-        $text =$this->message?->text();
+        $text = $this->message?->text();
 
         if ($text !== null && str_starts_with($text, '/')) {
             parent::handleMessage();
             return;
         }
 
-        $user = User::where('telegram_id',$this->message?->from()?->id())->first();
+        $user = User::where('telegram_id', $this->message?->from()?->id())->first();
 
-        if (!$user || !$user->current_wallet_id) {$this->chat->html("Сначала отправь /start, чтобы я настроил твой профиль!")->send();
+        if (!$user || !$user->current_wallet_id) {
+            $this->chat->html("Сначала отправь /start!")->send();
             return;
         }
 
@@ -75,142 +79,69 @@ class BudgetBotHandler extends WebhookHandler
             return;
         }
 
-        if ($text !== null) {$this->handleTextTransaction(new Stringable($text),$user);
+        if ($text !== null) {
+            $this->handleChatMessage(new Stringable($text));
             return;
         }
 
-        $this->chat->html("Я пока понимаю только текст и фото чеков! 🧐")->send();
+        $this->chat->html("Я пока понимаю только текст и фото чеков!")->send();
     }
 
-    protected function handleTextTransaction(Stringable $text, User$user): void
-    {
-        if (preg_match('/^(\d+(?:[.,]\d+)?)\s+(.+)$/u', trim($text),$matches)) {
-            $amount = (float) str_replace(',', '.',$matches[1]);
-            $description = trim($matches[2]);
-
-            $category = Category::where('wallet_id',$user->current_wallet_id)
-                ->where('name', 'LIKE', "%{$description}%")
-                ->first();
-
-            $this->saveTransaction($user,$amount, $description,$category);
-        } else {
-            $this->chat->html("Не совсем понял формат. Напиши сумму и на что потратил, например:\n<code>450.50 глово</code>")->send();
-        }
-    }
 
     protected function processReceipt(User $user): void
     {
-        $this->chat->html("Фото получено! 📸 Анализирую чек и определяю магазин...")->send();
+        $photo = $this->message->photos()->last();
+        $botToken = $this->bot->token;
 
-        try {
-            $photo = $this->message->photos()->last();
-            $token = $this->bot->token;
-            $telegramResponse = Http::get("https://api.telegram.org/bot{$token}/getFile?file_id={$photo->id()}");
-            $filePath = $telegramResponse->json('result.file_path');
-            $photoUrl = "https://api.telegram.org/file/bot{$token}/{$filePath}";
+        $this->chat->html("Производится анализ чека...")->send();
 
-            $imageContents = Http::get($photoUrl)->body();
-            $base64Image = base64_encode($imageContents);
-
-            $categoriesList = Category::where('wallet_id', $user->current_wallet_id)->pluck('name')->implode(', ');
-
-            $apiKey = env('GEMINI_API_KEY');
-            $geminiResponse = Http::post("https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={$apiKey}", [
-                'contents' => [
-                    [
-                        'parts' => [
-                            [
-                                'text' => "Проанализируй этот чек. Верни ТОЛЬКО валидный JSON-объект с двумя ключами: \"store_name\" (строка, название магазина или заведения. Если неизвестно - \"Неизвестно\") и \"items\" (массив объектов). Каждый объект в массиве items — это товар с полями: \"amount\" (число с плавающей точкой), \"description\" (название товара), \"category_name\" (выбери из списка: [{$categoriesList}]. Если ничего не подходит, придумай короткое название для новой категории, максимум 2 слова), \"category_icon\" (строго один эмодзи). Игнорируй промежуточные итоги и налоги. Не используй маркдаун."
-                            ],
-                            [
-                                'inlineData' => [
-                                    'mimeType' => 'image/jpeg',
-                                    'data' => $base64Image
-                                ]
-                            ]
-                        ]
-                    ]
-                ]
-            ]);
-
-            if ($geminiResponse->failed()) {
-                $this->chat->html("❌ Ошибка Gemini API: " . $geminiResponse->json('error.message'))->send();
-                return;
-            }
-
-            $rawContent = $geminiResponse->json('candidates.0.content.parts.0.text');
-            $cleanContent = str_replace(['```json', '```', "\n"], '', $rawContent);
-            $aiData = json_decode(trim($cleanContent), true);
-
-            if (!$aiData || !isset($aiData['items'])) {
-                $this->chat->html("Не смог распарсить данные чека 😔\nСырой ответ: <code>{$rawContent}</code>")->send();
-                return;
-            }
-
-            $storeName = $aiData['store_name'] ?? 'Неизвестный магазин';
-            $items = $aiData['items'];
-            $batchId = (string) \Illuminate\Support\Str::uuid();
-            $totalAmount = 0;
-
-            $text = "🏪 <b>{$storeName}</b>\n🧾 Чек обработан:\n\n";
-
-            foreach ($items as $item) {
-                if (!isset($item['amount'])) continue;
-
-                $catName = $item['category_name'] ?? 'Разное';
-                $catIcon = $item['category_icon'] ?? '📦';
-                $amount = (float) $item['amount'];
-
-                $category = Category::firstOrCreate(
-                    ['wallet_id' => $user->current_wallet_id, 'name' => $catName],
-                    ['icon' => $catIcon, 'type' => 'expense']
-                );
-
-                $totalAmount += $amount;
-
-                $this->saveTransaction($user, $amount, $item['description'], $category, [
-                    'source' => 'receipt_photo',
-                    'batch_id' => $batchId,
-                    'store' => $storeName
-                ], true);
-
-                $formattedAmount = number_format($amount, 2, '.', ' ');
-                $text .= "{$category->icon} {$item['description']} — <b>{$formattedAmount}</b>\n";
-            }
-
-            $formattedTotal = number_format($totalAmount, 2, '.', ' ');
-            $text .= "\nИтого сохранено: <b>{$formattedTotal}</b>";
-
-            $this->chat->html($text)
-                ->keyboard(\DefStudio\Telegraph\Keyboard\Keyboard::make()->buttons([
-                    \DefStudio\Telegraph\Keyboard\Button::make('❌ Удалить весь чек')->action('confirmUndo')->param('batch_id', $batchId),
-                ]))->send();
-
-        } catch (\Exception $e) {
-            $this->chat->html("Произошла ошибка: " . $e->getMessage())->send();
-        }
+        // Отправляем задачу в очередь
+        \App\Jobs\ParseReceiptJob::dispatch($user, $photo->id(), $this->chat, $botToken);
     }
 
-    protected function saveTransaction(User $user, float$amount, string $description, ?Category $category = null, array $aiMetadata = null, bool$silent = false): void
+    protected function saveTransaction(User $user, float $amount, string $description, ?Category $category = null, array $aiMetadata = null, bool $silent = false, ?string $purchasedAt = null, string $paymentMethod = 'unknown'): Transaction
     {
-        $transaction =$user->transactions()->create([
+        $transaction = $user->transactions()->create([
             'wallet_id' => $user->current_wallet_id,
             'category_id' => $category?->id,
             'amount' => (int) round($amount * 100),
             'type' => 'expense',
             'description' => $description,
             'ai_metadata' => $aiMetadata,
+            'payment_method' => $paymentMethod,
             'transaction_date' => now(),
+            'purchased_at' => $purchasedAt ? Carbon::parse($purchasedAt) : now(),
         ]);
 
         if (!$silent) {
-            $categoryName =$category ? $category->icon . ' ' .$category->name : '🤷 Без категории';
-            $formattedAmount = number_format($amount, 2, '.', ' ');
-            $this->chat->html("✅ Записал расход!\n\n💰 Сумма: <b>{$formattedAmount}</b>\n📝 Описание: <i>{$description}</i>\n📁 Категория: {$categoryName}")
-                ->keyboard(\DefStudio\Telegraph\Keyboard\Keyboard::make()->buttons([
-                    \DefStudio\Telegraph\Keyboard\Button::make('❌ Отменить')->action('confirmUndo')->param('id', $transaction->id),
-                ]))->send();
+            $wallet = Wallet::find($user->current_wallet_id);
+            $currency = $wallet->currency ?? '€';
+            $categoryName = $category ? $category->icon . ' ' . $category->name : '🤷 Без категории';
+            $this->chat->html("✅ Записал расход!\n💰 Сумма: <b>" . number_format($amount, 2, '.', ' ') . " {$currency}</b>\n📝 <i>{$description}</i>\n📁 {$categoryName}")->send();
         }
+
+        return $transaction;
+    }
+
+    // Обработчик нажатия на кнопки способа оплаты
+    public function setPaymentMethod(): void
+    {
+        $method = $this->data->get('method'); // 'cash' или 'card'
+        $batchId = $this->data->get('batch_id'); // если это чек
+        $transactionId = $this->data->get('id'); // если это ручной ввод
+
+        $methodName = $method === 'cash' ? '💵 Наличные' : '💳 Карта';
+
+        if ($batchId) {
+            // Обновляем весь чек сразу
+            Transaction::where('ai_metadata->batch_id', $batchId)->update(['payment_method' => $method]);
+        } elseif ($transactionId) {
+            // Обновляем одну транзакцию
+            Transaction::where('id', $transactionId)->update(['payment_method' => $method]);
+        }
+
+        // Заменяем сообщение с кнопками на текст успеха
+        $this->chat->edit($this->messageId)->html("✅ Способ оплаты сохранен: <b>{$methodName}</b>")->send();
     }
 
     public function report(): void
@@ -223,12 +154,15 @@ class BudgetBotHandler extends WebhookHandler
         }
 
         $walletId = $user->current_wallet_id;
+        $wallet = \App\Models\Wallet::find($walletId);
+        $currency = $wallet->currency ?? '€';
         $startOfMonth = now()->startOfMonth();
 
-        $totals = \App\Models\Transaction::select('category_id', DB::raw('SUM(amount) as total'))
+        // 1. Считаем суммы по категориям
+        $totals = \App\Models\Transaction::select('category_id', \Illuminate\Support\Facades\DB::raw('SUM(amount) as total'))
             ->where('wallet_id', $walletId)
             ->where('type', 'expense')
-            ->where('transaction_date', '>=', $startOfMonth)
+            ->where('purchased_at', '>=', $startOfMonth)
             ->groupBy('category_id')
             ->get();
 
@@ -238,20 +172,37 @@ class BudgetBotHandler extends WebhookHandler
         }
 
         $totalSum = $totals->sum('total') / 100;
-
         $categoryIds = $totals->pluck('category_id')->filter();
-        $categories = Category::whereIn('id', $categoryIds)->get()->keyBy('id');
+        $categories = \App\Models\Category::whereIn('id', $categoryIds)->get()->keyBy('id');
 
         $text = "📊 <b>Отчет за месяц:</b>\n\n";
 
         foreach ($totals as $row) {
             $cat = $categories->get($row->category_id);
             $catName = $cat ? $cat->icon . ' ' . $cat->name : '🤷 Без категории';
-            $sum = number_format($row->total / 100, 2, '.', ' ');
+            $sum = number_format($row->total / 100, 2, '.', ' ') . " {$currency}";
             $text .= "{$catName}: <b>{$sum}</b>\n";
         }
 
-        $formattedTotal = number_format($totalSum, 2, '.', ' ');
+        // 2. Считаем суммы по способу оплаты
+        $paymentTotals = \App\Models\Transaction::select('payment_method', \Illuminate\Support\Facades\DB::raw('SUM(amount) as total'))
+            ->where('wallet_id', $walletId)
+            ->where('type', 'expense')
+            ->where('purchased_at', '>=', $startOfMonth)
+            ->groupBy('payment_method')
+            ->pluck('total', 'payment_method');
+
+        $cashSum = ($paymentTotals->get('cash', 0)) / 100;
+        $cardSum = ($paymentTotals->get('card', 0)) / 100;
+        $unknownSum = ($paymentTotals->get('unknown', 0)) / 100;
+
+        $text .= "\n💳 <b>Способы оплаты:</b>\n";
+        if ($cashSum > 0) $text .= "💵 Наличными: <b>" . number_format($cashSum, 2, '.', ' ') . " {$currency}</b>\n";
+        if ($cardSum > 0) $text .= "💳 Картой: <b>" . number_format($cardSum, 2, '.', ' ') . " {$currency}</b>\n";
+        if ($unknownSum > 0) $text .= "❓ Неизвестно: <b>" . number_format($unknownSum, 2, '.', ' ') . " {$currency}</b>\n";
+
+        // 3. Итоговая сумма
+        $formattedTotal = number_format($totalSum, 2, '.', ' ') . " {$currency}";
         $text .= "\nИтого потрачено: <b>{$formattedTotal}</b>";
 
         $this->chat->html($text)->send();
@@ -266,11 +217,15 @@ class BudgetBotHandler extends WebhookHandler
             return;
         }
 
+        // Получаем текущий кошелек и его валюту (по умолчанию '€')
+        $wallet = \App\Models\Wallet::find($user->current_wallet_id);
+        $currency = $wallet->currency ?? '€';
+
         $startOfMonth = now()->startOfMonth();
 
         $transactions = \App\Models\Transaction::where('wallet_id', $user->current_wallet_id)
             ->where('type', 'expense')
-            ->where('transaction_date', '>=', $startOfMonth)
+            ->where('purchased_at', '>=', $startOfMonth)
             ->get();
 
         if ($transactions->isEmpty()) {
@@ -300,12 +255,14 @@ class BudgetBotHandler extends WebhookHandler
         $text = "🏪 <b>Траты по магазинам за месяц:</b>\n\n";
 
         foreach ($storeTotals as $store => $amount) {
-            $sum = number_format($amount / 100, 2, '.', ' ');
+            // Добавляем валюту к сумме по магазину
+            $sum = number_format($amount / 100, 2, '.', ' ') . " {$currency}";
             $icon = $store === 'Разное / Вручную' ? '✍️' : '🏬';
             $text .= "{$icon} {$store}: <b>{$sum}</b>\n";
         }
 
-        $formattedTotal = number_format($totalSum / 100, 2, '.', ' ');
+        // Добавляем валюту к итоговой сумме
+        $formattedTotal = number_format($totalSum / 100, 2, '.', ' ') . " {$currency}";
         $text .= "\nИтого: <b>{$formattedTotal}</b>";
 
         $this->chat->html($text)->send();
@@ -352,7 +309,7 @@ class BudgetBotHandler extends WebhookHandler
             [
                 'name' => $firstName,
                 'email' => $telegramId . '@telegram.bot',
-                'password' => bcrypt(\Illuminate\Support\Str::random(16)),
+                'password' => bcrypt(Str::random(16)),
             ]
         );
 
@@ -421,5 +378,73 @@ class BudgetBotHandler extends WebhookHandler
     public function cancelUndo(): void
     {
         $this->chat->edit($this->messageId)->html("🛡 Действие отменено. Запись оставлена в бюджете.")->send();
+    }
+
+    public function currency(): void
+    {
+        $user = User::where('telegram_id', $this->message?->from()?->id())->first();
+
+        if (!$user || !$user->current_wallet_id) {
+            $this->chat->html("Сначала отправь /start!")->send();
+            return;
+        }
+
+        $this->chat->html("Выберите валюту для вашего кошелька:")
+            ->keyboard(Keyboard::make()->buttons([
+                Button::make('€ Евро')->action('setCurrency')->param('c', '€'),
+                Button::make('$ Доллар')->action('setCurrency')->param('c', '$'),
+                Button::make('₽ Рубль')->action('setCurrency')->param('c', '₽'),
+                Button::make('сом Сом')->action('setCurrency')->param('c', 'сом'),
+            ]))->send();
+    }
+
+    public function setCurrency(): void
+    {
+        $currencySign = $this->data->get('c');
+        $user = User::where('telegram_id', $this->chat->chat_id)->first();
+
+        if ($user && $user->current_wallet_id) {
+            Wallet::where('id', $user->current_wallet_id)->update(['currency' => $currencySign]);
+            $this->chat->edit($this->messageId)->html("✅ Валюта кошелька успешно изменена на <b>{$currencySign}</b>")->send();
+        }
+    }
+
+    /**
+     * Обработка обычных текстовых сообщений
+     */
+    protected function handleChatMessage(\Illuminate\Support\Stringable $text): void
+    {
+        $user = \App\Models\User::where('telegram_id', $this->message?->from()?->id())->first();
+
+        if (!$user || !$user->current_wallet_id) {
+            $this->chat->html("Сначала отправь /start, чтобы я настроил твой профиль!")->send();
+            return;
+        }
+
+        $this->chat->html("Анализируем... ")->send();
+
+        \App\Jobs\ParseTextJob::dispatch($user->id, $this->chat->id, $text->value());
+    }
+
+    /**
+     * Обработчик нажатия на кнопки выбора способа оплаты
+     */
+    public function updatePayment(): void
+    {
+        $method = $this->data->get('method');
+        $cacheKey = $this->data->get('key');
+        $ids = \Illuminate\Support\Facades\Cache::get($cacheKey);
+
+        if (!$ids) {
+            $this->chat->html("❌ Время ожидания истекло или способ оплаты уже был выбран.")->send();
+            $this->deleteKeyboard();
+            return;
+        }
+
+        \App\Models\Transaction::whereIn('id', $ids)->update(['payment_method' => $method]);
+        \Illuminate\Support\Facades\Cache::forget($cacheKey);
+        $methodName = $method === 'cash' ? '💵 Наличными' : '💳 Картой';
+        $this->deleteKeyboard();
+        $this->chat->html("✅ Отлично! Способ оплаты обновлен на: <b>{$methodName}</b>")->send();
     }
 }
