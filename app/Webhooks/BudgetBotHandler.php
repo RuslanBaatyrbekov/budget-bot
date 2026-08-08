@@ -55,7 +55,7 @@ class BudgetBotHandler extends WebhookHandler
             }
         }
 
-        $this->chat->html("Привет, <b>{$firstName}</b>! 👋\n\nОтправь мне текст (например, <code>1500 глово</code>) или фото чека.")->send();
+        $this->chat->html("Привет, <b>{$firstName}</b>! 👋\n\nОтправь мне текст (например, <code>3 евро за книгу</code>) или фото чека.")->send();
     }
 
     protected function handleMessage(): void

@@ -10,12 +10,8 @@ use Filament\Widgets\TableWidget as BaseWidget;
 
 class TopTransactionsWidget extends BaseWidget
 {
-    // Будет отображаться под графиками
-    protected static ?int $sort = 3;
-
-    // Растягиваем таблицу на всю ширину экрана
+    protected static ?int $sort = 5;
     protected int | string | array $columnSpan = 'full';
-
     protected static ?string $heading = '🏆 Топ-5 самых крупных расходов за месяц';
 
     public function table(Table $table): Table
@@ -49,6 +45,6 @@ class TopTransactionsWidget extends BaseWidget
                     ->color('danger')
                     ->weight('bold'),
             ])
-            ->paginated(false); // Отключаем пагинацию, так как нам нужно ровно 5 записей
+            ->paginated(false);
     }
 }

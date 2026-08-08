@@ -40,6 +40,8 @@ class AdminPanelProvider extends PanelProvider
                 \App\Filament\Widgets\ExpensesChart::class,
                 \App\Filament\Widgets\ExpensesByCategoryChart::class,
                 \App\Filament\Widgets\TopTransactionsWidget::class,
+                \App\Filament\Widgets\StoreExpensesChart::class,
+                \App\Filament\Widgets\WeeklyRadarChart::class,
             ])
             ->middleware([
                 EncryptCookies::class,

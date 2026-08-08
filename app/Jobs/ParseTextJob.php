@@ -33,25 +33,27 @@ class ParseTextJob implements ShouldQueue
         $chat = TelegraphChat::find($this->chatId);
         $apiKey = env('GEMINI_API_KEY');
 
-        // Передаем нейросети текущую дату и время, чтобы она могла вычислять слова "вчера", "сегодня", "час назад"
         $currentDate = now()->format('Y-m-d H:i:s');
+        $wallet = Wallet::find($user->current_wallet_id);
+        $categoriesList = $wallet->categories()->pluck('name')->implode(', ');
 
-        $prompt = "Ты умный финансовый помощник. Пользователь написал текст о своих расходах: '{$this->text}'.
-        Твоя задача — извлечь данные и вернуть ТОЛЬКО валидный JSON (без форматирования markdown и лишних слов).
-        Текущая дата и время: {$currentDate}. Если пользователь указывает время (например, 'вчера', 'утром'), вычисли правильную дату на основе текущей. Если время не указано, используй текущую.
+        $prompt = "Ты умный финансовый помощник. Пользователь написал текст: '{$this->text}'.
+        ВНИМАНИЕ: Если в тексте нет явного упоминания трат, покупок или нет никаких чисел/сумм, верни пустой массив items: [].
+        В противном случае извлеки данные и верни ТОЛЬКО валидный JSON (без markdown).
+        Текущая дата и время: {$currentDate}. Если пользователь указывает время ('вчера'), вычисли правильную дату.
         Если способ оплаты не указан, ставь 'unknown'.
 
         Формат ответа строго такой:
         {
-          \"store_name\": \"Название места/магазина (если есть, иначе null)\",
+          \"store_name\": \"Название (если есть, иначе null)\",
           \"date\": \"YYYY-MM-DD HH:MM:SS\",
           \"payment_method\": \"cash, card или unknown\",
           \"items\": [
             {
               \"amount\": 150.50,
-              \"description\": \"Название товара или услуги\",
-              \"category_name\": \"Подходящая категория на русском (например: Продукты, Транспорт, Кафе)\",
-              \"category_icon\": \"Эмодзи категории\"
+              \"description\": \"Название\",
+              \"category_name\": \"Категория на русском. ВАЖНО: используй одну из существующих [{$categoriesList}] ТОЛЬКО если она идеально подходит по смыслу. Если не подходит, ОБЯЗАТЕЛЬНО придумай новую точную категорию (например 'Транспорт', 'Аптека', 'Одежда')\",
+              \"category_icon\": \"Максимально подходящий эмодзи\"
             }
           ]
         }";
@@ -79,26 +81,26 @@ class ParseTextJob implements ShouldQueue
         }
 
         $data = $geminiResponse->json('candidates.0.content.parts.0.text');
-
-        // Очищаем от возможных артефактов markdown
         $data = str_replace(['```json', '```'], '', trim($data));
         $parsed = json_decode($data, true);
 
-        if (!$parsed || !isset($parsed['items']) || empty($parsed['items'])) {
-            $chat->html("❌ Не смог распознать траты в твоем сообщении. Напиши, пожалуйста, чуть конкретнее.")->send();
+        $validItems = array_filter($parsed['items'] ?? [], function($item) {
+            return isset($item['amount']) && floatval($item['amount']) > 0;
+        });
+
+        if (empty($validItems)) {
+            $chat->html("В сообщении не указана сумма. Необходимо указать подробнее, например: <i>'ремонт 500'</i> или <i>'кофе 2.50'</i>.")->send();
             return;
         }
 
         $total = 0;
         $itemsText = "";
-        $wallet = Wallet::find($user->current_wallet_id);
         $currency = $wallet->currency ?? 'сом';
 
-        // Вытаскиваем способ оплаты, если ИИ его не нашел — ставим unknown
         $paymentMethod = $parsed['payment_method'] ?? 'unknown';
-        $transactionIds = []; // Сюда соберем ID созданных транзакций
+        $transactionIds = [];
 
-        foreach ($parsed['items'] as $item) {
+        foreach ($validItems as $item) {
             $category = Category::firstOrCreate(
                 [
                     'name' => $item['category_name'],
@@ -115,7 +117,7 @@ class ParseTextJob implements ShouldQueue
                 'wallet_id' => $wallet->id,
                 'category_id' => $category->id,
                 'type' => 'expense',
-                'amount' => $item['amount'] * 100, // Переводим в копейки
+                'amount' => $item['amount'] * 100,
                 'description' => $item['description'],
                 'payment_method' => $paymentMethod,
                 'purchased_at' => $parsed['date'] ?? now(),
@@ -130,19 +132,16 @@ class ParseTextJob implements ShouldQueue
         $storeText = !empty($parsed['store_name']) ? "в <b>{$parsed['store_name']}</b> " : "";
         $messageText = "✅ Записал траты {$storeText}📝\n\n{$itemsText}\nИтого: <b>" . number_format($total, 2, '.', ' ') . " {$currency}</b>";
 
-        // Если ИИ не понял, как была произведена оплата — спрашиваем сами
         if ($paymentMethod === 'unknown') {
             $cacheKey = 'pay_' . uniqid();
-            // Сохраняем ID транзакций в кэш на 2 часа, чтобы обновить их по клику
             \Illuminate\Support\Facades\Cache::put($cacheKey, $transactionIds, now()->addHours(2));
 
-            $chat->html($messageText . "\n\n❓ <b>Уточни, пожалуйста, как ты это оплатил?</b>")
+            $chat->html($messageText . "\n\n❓ <b>Уточните каким способом была произведена оплата?</b>")
                 ->keyboard(\DefStudio\Telegraph\Keyboard\Keyboard::make()->buttons([
                     \DefStudio\Telegraph\Keyboard\Button::make('💵 Наличными')->action('updatePayment')->param('method', 'cash')->param('key', $cacheKey),
                     \DefStudio\Telegraph\Keyboard\Button::make('💳 Картой')->action('updatePayment')->param('method', 'card')->param('key', $cacheKey),
                 ]))->send();
         } else {
-            // Если способ оплаты известен — просто отправляем отчет
             $chat->html($messageText)->send();
         }
     }

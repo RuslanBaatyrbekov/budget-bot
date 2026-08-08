@@ -14,7 +14,7 @@ class ExpensesChart extends ChartWidget
     protected static ?string $heading = 'Динамика расходов';
     protected static ?int $sort = 2;
 
-    public ?string $filter = 'week'; // Ставим фильтр "За неделю" по умолчанию при загрузке страницы
+    public ?string $filter = 'week';
 
     protected function getFilters(): ?array
     {
@@ -37,12 +37,10 @@ class ExpensesChart extends ChartWidget
             default => Carbon::today()->subMonth(),
         };
 
-        // Используем новую колонку purchased_at для графика
         $query = Trend::model(Transaction::class)
             ->dateColumn('purchased_at')
             ->between(start: $startDate, end: Carbon::now());
 
-        // Динамичная группировка, чтобы графики всегда выглядели красиво
         if ($activeFilter === 'today') {
             $data = $query->perHour()->sum('amount');
             $labels = $data->map(fn (TrendValue $value) => Carbon::parse($value->date)->format('H:i'))->toArray();
@@ -58,7 +56,6 @@ class ExpensesChart extends ChartWidget
             'datasets' => [
                 [
                     'label' => 'Потрачено',
-                    // Делим на 100, так как суммы в базе хранятся в копейках!
                     'data' => $data->map(fn (TrendValue $value) => $value->aggregate / 100)->toArray(),
                     'borderColor' => '#ef4444',
                     'backgroundColor' => 'rgba(239, 68, 68, 0.1)',

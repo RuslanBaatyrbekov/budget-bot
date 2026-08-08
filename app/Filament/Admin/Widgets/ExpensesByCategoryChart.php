@@ -32,7 +32,6 @@ class ExpensesByCategoryChart extends ChartWidget
             default => Carbon::today()->subMonth(),
         };
 
-        // Получаем суммы трат, сгруппированные по категориям
         $transactions = Transaction::with('category')
             ->where('created_at', '>=', $startDate)
             ->select('category_id', DB::raw('SUM(amount) as total'))

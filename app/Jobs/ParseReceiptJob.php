@@ -23,20 +23,19 @@ class ParseReceiptJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public $tries = 2; // Количество попыток при сбое
-    public $timeout = 120; // Даем процессу больше времени на ожидание ответа
+    public $tries = 2;
+    public $timeout = 120;
 
     public function __construct(
         public User $user,
         public string $photoId,
         public TelegraphChat $chat,
-        public string $botToken // Передаем токен бота для скачивания файла
+        public string $botToken
     ) {}
 
     public function handle(): void
     {
         try {
-            // 1. Получаем путь к файлу в Telegram
             $telegramResponse = Http::timeout(10)->get("https://api.telegram.org/bot{$this->botToken}/getFile?file_id={$this->photoId}");
 
             if ($telegramResponse->failed()) {
@@ -45,18 +44,23 @@ class ParseReceiptJob implements ShouldQueue
 
             $filePath = $telegramResponse->json('result.file_path');
             $photoUrl = "https://api.telegram.org/file/bot{$this->botToken}/{$filePath}";
-
-            // 2. Скачиваем само изображение
             $imageContents = Http::timeout(20)->get($photoUrl)->body();
             $base64Image = base64_encode($imageContents);
 
-            // 3. Формируем запрос к Gemini
             $categoriesList = Category::where('wallet_id', $this->user->current_wallet_id)->pluck('name')->implode(', ');
             $apiKey = env('GEMINI_API_KEY');
 
-            $prompt = "Проанализируй этот чек. Верни ТОЛЬКО валидный JSON-объект с 4 ключами: \"store_name\" (название магазина), \"date\" (дата YYYY-MM-DD HH:MM:SS или null), \"payment_method\" (строка: \"cash\" если наличные, \"card\" если безнал/карта/электронными, или \"unknown\" если не указано) и \"items\" (массив объектов). Каждый объект в items — это товар: \"amount\" (число), \"description\" (название), \"category_name\" (выбери из: [{$categoriesList}] или придумай), \"category_icon\" (один эмодзи).";
+            $prompt = "Проанализируй этот чек. Верни ТОЛЬКО валидный JSON-объект с 4 ключами:
+            \"store_name\" (название магазина),
+            \"date\" (дата YYYY-MM-DD HH:MM:SS или null),
+            \"payment_method\" (строка: \"cash\" если наличные, \"card\" если безнал/карта/электронными, или \"unknown\" если не указано)
+            и \"items\" (массив объектов).
 
-//            $geminiResponse = Http::timeout(45)->post("https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={$apiKey}", [
+            Каждый объект в items — это товар:
+            \"amount\" (число),
+            \"description\" (название),
+            \"category_name\" (категория на русском. ВАЖНО: используй одну из существующих [{$categoriesList}] ТОЛЬКО если она идеально подходит по смыслу. Если товар туда не вписывается, ОБЯЗАТЕЛЬНО придумай новую точную категорию, например 'Бытовая химия', 'Аптека', 'Красота и уход', 'Одежда'),
+            \"category_icon\" (один максимально подходящий эмодзи).";
             $geminiResponse = Http::timeout(45)->post("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={$apiKey}", [
                 'contents' => [[
                     'parts' => [
@@ -84,7 +88,6 @@ class ParseReceiptJob implements ShouldQueue
 
             $rawContent = $geminiResponse->json('candidates.0.content.parts.0.text');
 
-// Пишем успешный сырой ответ в наш отдельный лог
             Log::channel('ai')->info("Gemini Raw Response", [
                 'user_id' => $this->user->id,
                 'raw_text' => $rawContent
@@ -106,7 +109,6 @@ class ParseReceiptJob implements ShouldQueue
                 throw new \Exception("Не удалось расшифровать данные чека.");
             }
 
-            // 4. Парсинг успешен, сохраняем данные
             $storeName = $aiData['store_name'] ?? 'Неизвестно';
             $receiptDate = $aiData['date'] ?? null;
             $paymentMethod = $aiData['payment_method'] ?? 'unknown';
@@ -139,7 +141,6 @@ class ParseReceiptJob implements ShouldQueue
 
                 $totalAmount += $amount;
 
-                // Создаем транзакцию напрямую
                 $this->user->transactions()->create([
                     'wallet_id' => $this->user->current_wallet_id,
                     'category_id' => $category->id,
@@ -160,7 +161,6 @@ class ParseReceiptJob implements ShouldQueue
 
             $this->chat->html($text)->send();
 
-            // Если способ оплаты неизвестен, отправляем клавиатуру отдельным сообщением
             if ($paymentMethod === 'unknown') {
                 $this->chat->html("Не смог определить способ оплаты по чеку. Как вы платили?")
                     ->keyboard(Keyboard::make()->buttons([
