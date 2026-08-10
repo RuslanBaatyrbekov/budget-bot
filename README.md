@@ -1,58 +1,66 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# 🤖 AI Family Budget Tracker
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+A smart, automated family finance manager built with **Laravel 11**. 
+Instead of manually entering expenses, users simply forward receipts (images) or voice/text messages to a **Telegram Bot**. The bot uses **Google Gemini AI** to extract transaction details and categorizes them into a beautiful **Filament Admin Dashboard**.
 
-## About Laravel
+## ✨ Key Features
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+*   **AI Data Extraction:** Parses natural language ("Bought coffee for 5 euros") and receipt photos into structured JSON data using the Gemini API.
+*   **Telegram Integration:** Fully functional conversational bot built with `defstudio/telegraph`.
+*   **Shared Family Wallets:** Multiple users can join a single wallet via a unique code to track family expenses collaboratively.
+*   **Smart Dashboard:** Visualizes spending habits with Filament-powered charts (Daily Dynamics, Store Distribution, Weekly Radar).
+*   **Background Processing:** AI parsing and Telegram webhooks are decoupled into robust background Jobs/Workers to ensure fast response times.
+*   **Reliable Testing:** Core logic is covered by Feature tests using advanced API and Queue mocking (`Http::fake`, `Queue::fake`).
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+## 🛠️ Tech Stack
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+*   **Backend:** PHP 8.2+, Laravel 11
+*   **Admin Panel:** Filament v3
+*   **AI / LLM:** Google Gemini Pro / Flash API
+*   **Bot API:** Telegram Bot API
+*   **Infrastructure:** Docker Compose, Redis (Queues), Ngrok (Webhooks)
+*   **Testing:** PHPUnit, Laravel Testing Fakes
 
-## Learning Laravel
+## 📸 Screenshots
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
+| Telegram Bot (AI Parsing) | Admin Dashboard (Filament) |
+| :---: | :---: |
+| <img width="1523" height="713" alt="image" src="https://github.com/user-attachments/assets/b3fac9d1-f14b-4ae1-aec5-34764b9af984" /> | <img width="850" height="892" alt="image" src="https://github.com/user-attachments/assets/8af1a1a4-57e2-41fd-a799-439270094cd6" /> |
 
-In addition, [Laracasts](https://laracasts.com) contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+## 🚀 Local Setup & Installation
 
-You can also watch bite-sized lessons with real-world projects on [Laravel Learn](https://laravel.com/learn), where you will be guided through building a Laravel application from scratch while learning PHP fundamentals.
-
-## Agentic Development
-
-Laravel's predictable structure and conventions make it ideal for AI coding agents like Claude Code, Cursor, and GitHub Copilot. Install [Laravel Boost](https://laravel.com/docs/ai) to supercharge your AI workflow:
-
+**1. Clone the repository and install dependencies**
 ```bash
-composer require laravel/boost --dev
-
-php artisan boost:install
+git clone [https://github.com/RuslanBaatyrbekov/budget-bot.git](https://github.com/RuslanBaatyrbekov/budget-bot.git)
+cd budget-bot
+composer install
 ```
 
-Boost provides your agent 15+ tools and skills that help agents build Laravel applications while following best practices.
+**2. Configure Environment**
+Copy the `.env.example` file and configure your database, Telegram bot token, and Gemini API key:
+```bash
+cp .env.example .env
+php artisan key:generate
+```
 
-## Contributing
+**3. Run Infrastructure (Docker)**
+Start the Laravel Sail environment along with the queue worker:
+```bash
+./vendor/bin/sail up -d
+./vendor/bin/sail artisan migrate --seed
+```
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+**4. Set up Telegram Webhook**
+Use Ngrok or any local tunnel to expose your app, then register the webhook:
+```bash
+ngrok http 80
+./vendor/bin/sail artisan telegraph:set-webhook [https://your-ngrok-url.ngrok-free.app/telegraph/](https://your-ngrok-url.ngrok-free.app/telegraph/){token}/webhook
+```
 
-## Code of Conduct
+## 🧪 Testing
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+The project includes strict automated tests to ensure API reliability and proper queue dispatching without hitting real rate limits.
 
-## Security Vulnerabilities
-
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
-
-## License
-
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+```bash
+./vendor/bin/sail artisan test
+```
