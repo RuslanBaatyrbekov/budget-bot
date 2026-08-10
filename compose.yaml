@@ -86,6 +86,7 @@ services:
         depends_on:
             - mysql
             - redis
+            - whisper
         command: php artisan queue:work --timeout=120
     ngrok:
         image: ngrok/ngrok:latest
@@ -100,6 +101,17 @@ services:
             - laravel.test
         networks:
             - sail
+    whisper:
+        image: onerahmet/openai-whisper-asr-webservice:v1.4.0
+        container_name: budget_bot_whisper
+        environment:
+            - ASR_MODEL=small
+            - ASR_ENGINE=faster_whisper
+        ports:
+            - "9000:9000"
+        networks:
+            - sail
+        restart: unless-stopped
 networks:
     sail:
         driver: bridge

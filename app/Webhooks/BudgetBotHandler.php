@@ -11,6 +11,7 @@ use DefStudio\Telegraph\Keyboard\Button;
 use DefStudio\Telegraph\Keyboard\Keyboard;
 use Illuminate\Support\Str;
 use Illuminate\Support\Stringable;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Carbon;
@@ -79,12 +80,17 @@ class BudgetBotHandler extends WebhookHandler
             return;
         }
 
+        if ($this->message?->voice() !== null) {
+            $this->handleVoiceMessage($user, $this->message->voice()->id());
+            return;
+        }
+
         if ($text !== null) {
             $this->handleChatMessage(new Stringable($text));
             return;
         }
 
-        $this->chat->html("Я пока понимаю только текст и фото чеков!")->send();
+        $this->chat->html("Я пока понимаю только текст, фото чеков и голосовые сообщения!")->send();
     }
 
 
@@ -424,6 +430,35 @@ class BudgetBotHandler extends WebhookHandler
         $this->chat->html("Анализируем... ")->send();
 
         \App\Jobs\ParseTextJob::dispatch($user->id, $this->chat->id, $text->value());
+    }
+
+    protected function handleVoiceMessage(User $user, string $fileId): void
+    {
+        $token = $this->bot->token;
+
+        $fileInfoResponse = Http::get("https://api.telegram.org/bot{$token}/getFile", [
+            'file_id' => $fileId
+        ]);
+
+        if (! $fileInfoResponse->successful()) {
+            $this->chat->html('Не удалось загрузить голосовое сообщение.')->send();
+            return;
+        }
+
+        $filePath = $fileInfoResponse->json('result.file_path');
+
+        $downloadUrl = "https://api.telegram.org/file/bot{$token}/{$filePath}";
+        $fileContent = Http::get($downloadUrl)->body();
+
+        $fileName = 'voice_' . Str::random(10) . '.ogg';
+        $localPath = "temp/{$fileName}";
+        Storage::disk('local')->put($localPath, $fileContent);
+
+        $absolutePath = Storage::disk('local')->path($localPath);
+
+        \App\Jobs\ParseVoiceJob::dispatch($user->id, (string)$this->chat->id, $absolutePath);
+
+        $this->chat->html('Голосовое сообщение принято! Расшифровываем...')->send();
     }
 
     /**
