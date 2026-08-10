@@ -35,4 +35,7 @@ return [
         ],
     ],
 
+    'telegram' => [
+        'allowed_users' => explode(',', env('ALLOWED_TELEGRAM_USERS', '')),
+    ],
 ];
