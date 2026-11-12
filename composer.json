@@ -1,12 +1,19 @@
 {
     "$schema": "https://getcomposer.org/schema.json",
-    "name": "laravel/laravel",
+    "name": "ruslanbaatyrbekov/budget-bot",
     "type": "project",
-    "description": "The skeleton application for the Laravel framework.",
-    "keywords": ["laravel", "framework"],
+    "description": "Family budget tracker: Telegram bot with AI receipt, text and voice parsing plus a Filament dashboard.",
+    "keywords": [
+        "laravel",
+        "telegram-bot",
+        "budget",
+        "gemini",
+        "filament",
+        "whisper"
+    ],
     "license": "MIT",
     "require": {
-        "php": "^8.3",
+        "php": "^8.4",
         "defstudio/telegraph": "^1.72",
         "filament/filament": "^3.2",
         "flowframe/laravel-trend": "^0.5.0",
