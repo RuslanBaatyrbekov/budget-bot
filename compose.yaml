@@ -5,6 +5,7 @@ services:
             dockerfile: Dockerfile
             args:
                 WWWGROUP: '${WWWGROUP}'
+        restart: unless-stopped
         image: 'sail-8.5/app'
         extra_hosts:
             - 'host.docker.internal:host-gateway'
@@ -26,6 +27,7 @@ services:
             - redis
     mysql:
         image: 'mysql:8.4'
+        restart: unless-stopped
         ports:
             - '${FORWARD_DB_PORT:-3306}:3306'
         environment:
@@ -51,6 +53,7 @@ services:
             timeout: 5s
     redis:
         image: 'redis:alpine'
+        restart: unless-stopped
         ports:
             - '${FORWARD_REDIS_PORT:-6379}:6379'
         volumes:
@@ -94,9 +97,9 @@ services:
         command:
             - "http"
             - "laravel.test:80"
-            - "--domain=giveaway-embattled-spout.ngrok-free.dev"
+            - "--domain=${NGROK_DOMAIN}"
         environment:
-            - NGROK_AUTHTOKEN=3Ha0wdtI627Fqk0Vte2nh69dG3U_7Bk4orBGeNJpj35srntV7
+            NGROK_AUTHTOKEN: '${NGROK_AUTHTOKEN}'
         depends_on:
             - laravel.test
         networks:
