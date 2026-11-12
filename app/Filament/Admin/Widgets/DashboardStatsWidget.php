@@ -14,11 +14,26 @@ class DashboardStatsWidget extends BaseWidget
 
     protected function getStats(): array
     {
+        $user = auth()->user();
+
+        // БЕРЕМ СТРОГО ВЫБРАННЫЙ ТОБОЙ КОШЕЛЕК ИЗ СЕССИИ (с защитой)
+        $walletId = session('active_wallet_id') ?? $user?->current_wallet_id;
+
+        // Если кошелек по какой-то причине не найден, берем первый доступный юзеру, но не "абы какой" в системе
+        if (!$walletId && $user) {
+            $walletId = $user->wallets()->first()?->id;
+        }
+
+        $wallet = \App\Models\Wallet::find($walletId);
+        $currency = $wallet?->currency ?? 'сом';
+
         $startOfMonth = Carbon::now()->startOfMonth();
         $currentDay = Carbon::now()->day;
-        $currency = Wallet::first()->currency ?? 'сом';
 
-        $baseQuery = Transaction::where('type', 'expense')->where('purchased_at', '>=', $startOfMonth);
+        // Запрос жестко привязан к конкретному $walletId
+        $baseQuery = Transaction::where('wallet_id', $walletId)
+            ->where('type', 'expense')
+            ->where('purchased_at', '>=', $startOfMonth);
 
         $totalExpense = (clone $baseQuery)->sum('amount') / 100;
         $cashTotal = (clone $baseQuery)->where('payment_method', 'cash')->sum('amount') / 100;
@@ -36,7 +51,7 @@ class DashboardStatsWidget extends BaseWidget
         $minAmount = $minTransaction ? number_format($minTransaction->amount / 100, 2, '.', ' ') : '0';
 
         return [
-            Stat::make('Траты за месяц', number_format($totalExpense, 2, '.', ' ') . ' ' . $currency)
+            Stat::make('Траты за месяц (' . ($wallet?->name ?? 'Кошелек') . ')', number_format($totalExpense, 2, '.', ' ') . ' ' . $currency)
                 ->description('С ' . $startOfMonth->format('d.m.Y'))
                 ->descriptionIcon('heroicon-m-wallet')
                 ->color('primary'),

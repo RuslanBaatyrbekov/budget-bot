@@ -24,6 +24,7 @@ class ExpensesByCategoryChart extends ChartWidget
 
     protected function getData(): array
     {
+        $walletId = session('active_wallet_id') ?? auth()->user()?->current_wallet_id;
         $activeFilter = $this->filter;
 
         $startDate = match ($activeFilter) {
@@ -33,6 +34,7 @@ class ExpensesByCategoryChart extends ChartWidget
         };
 
         $transactions = Transaction::with('category')
+            ->where('wallet_id', $walletId)
             ->where('created_at', '>=', $startDate)
             ->select('category_id', DB::raw('SUM(amount) as total'))
             ->groupBy('category_id')

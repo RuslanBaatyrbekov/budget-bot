@@ -18,8 +18,41 @@ use Illuminate\Support\Carbon;
 
 class BudgetBotHandler extends WebhookHandler
 {
+    /**
+     * Проверяет, разрешено ли текущему пользователю использовать бота
+     */
+    private function isUserAllowed(): bool
+    {
+        $allowedString = env('ALLOWED_TELEGRAM_USERS', '');
+
+        if (empty(trim($allowedString))) {
+            return true;
+        }
+
+        $allowedUsers = array_filter(array_map('trim', explode(',', $allowedString)));
+        $currentUserId = (string) ($this->message?->from()?->id() ?? $this->callbackQuery?->from()?->id());
+
+        return in_array($currentUserId, $allowedUsers, true);
+    }
+
+    /**
+     * Отправляет сообщение с отказом и ссылкой на GitHub
+     */
+    private function rejectAccess(): void
+    {
+        $this->chat->html(
+            "Привет! 👋 Это приватный бот для ведения семейного бюджета.\n\n" .
+            "Хочешь такого же? Проект полностью бесплатный и открытый! " .
+            "Ты можешь в пару кликов развернуть его для своей семьи.\n\n" .
+            "Исходный код и инструкция тут: <a href='https://github.com/RuslanBaatyrbekov/budget-bot'>GitHub - AI Budget Tracker</a> 🚀"
+        )->send();
+    }
     public function start(): void
     {
+        if (!$this->isUserAllowed()) {
+            $this->rejectAccess();
+            return;
+        }
         $telegramId = $this->message?->from()?->id();
         $firstName = $this->message?->from()?->firstName() ?? 'Пользователь';
 
@@ -61,6 +94,11 @@ class BudgetBotHandler extends WebhookHandler
 
     protected function handleMessage(): void
     {
+        if (!$this->isUserAllowed()) {
+            $this->rejectAccess();
+            return;
+        }
+
         $text = $this->message?->text();
 
         if ($text !== null && str_starts_with($text, '/')) {
@@ -101,7 +139,6 @@ class BudgetBotHandler extends WebhookHandler
 
         $this->chat->html("Производится анализ чека...")->send();
 
-        // Отправляем задачу в очередь
         \App\Jobs\ParseReceiptJob::dispatch($user, $photo->id(), $this->chat, $botToken);
     }
 
@@ -129,29 +166,35 @@ class BudgetBotHandler extends WebhookHandler
         return $transaction;
     }
 
-    // Обработчик нажатия на кнопки способа оплаты
     public function setPaymentMethod(): void
     {
-        $method = $this->data->get('method'); // 'cash' или 'card'
-        $batchId = $this->data->get('batch_id'); // если это чек
-        $transactionId = $this->data->get('id'); // если это ручной ввод
+        if (!$this->isUserAllowed()) {
+            $this->rejectAccess();
+            return;
+        }
+
+        $method = $this->data->get('method');
+        $batchId = $this->data->get('batch_id');
+        $transactionId = $this->data->get('id');
 
         $methodName = $method === 'cash' ? '💵 Наличные' : '💳 Карта';
 
         if ($batchId) {
-            // Обновляем весь чек сразу
             Transaction::where('ai_metadata->batch_id', $batchId)->update(['payment_method' => $method]);
         } elseif ($transactionId) {
-            // Обновляем одну транзакцию
             Transaction::where('id', $transactionId)->update(['payment_method' => $method]);
         }
 
-        // Заменяем сообщение с кнопками на текст успеха
         $this->chat->edit($this->messageId)->html("✅ Способ оплаты сохранен: <b>{$methodName}</b>")->send();
     }
 
     public function report(): void
     {
+        if (!$this->isUserAllowed()) {
+            $this->rejectAccess();
+            return;
+        }
+
         $user = User::where('telegram_id', $this->message?->from()?->id())->first();
 
         if (!$user || !$user->current_wallet_id) {
@@ -159,63 +202,134 @@ class BudgetBotHandler extends WebhookHandler
             return;
         }
 
-        $walletId = $user->current_wallet_id;
-        $wallet = \App\Models\Wallet::find($walletId);
-        $currency = $wallet->currency ?? '€';
-        $startOfMonth = now()->startOfMonth();
+        // Запрашиваем отчет за текущий месяц по умолчанию
+        $now = now();
+        $payload = $this->generateReportPayload($user->current_wallet_id, $now->year, $now->month);
 
-        // 1. Считаем суммы по категориям
-        $totals = \App\Models\Transaction::select('category_id', \Illuminate\Support\Facades\DB::raw('SUM(amount) as total'))
-            ->where('wallet_id', $walletId)
-            ->where('type', 'expense')
-            ->where('purchased_at', '>=', $startOfMonth)
-            ->groupBy('category_id')
-            ->get();
+        $this->chat->html($payload['text'])
+            ->keyboard($payload['keyboard'])
+            ->send();
+    }
 
-        if ($totals->isEmpty()) {
-            $this->chat->html("В этом месяце у тебя еще не было расходов! 💸")->send();
+    /**
+     * Обработчик нажатия на кнопки "Вперед/Назад" по месяцам
+     */
+    public function changeReportMonth(): void
+    {
+        if (!$this->isUserAllowed()) {
+            $this->rejectAccess();
             return;
         }
 
-        $totalSum = $totals->sum('total') / 100;
-        $categoryIds = $totals->pluck('category_id')->filter();
-        $categories = \App\Models\Category::whereIn('id', $categoryIds)->get()->keyBy('id');
+        $year = (int) $this->data->get('y');
+        $month = (int) $this->data->get('m');
 
-        $text = "📊 <b>Отчет за месяц:</b>\n\n";
+        $telegramId = $this->callbackQuery?->from()?->id() ?? $this->message?->from()?->id();
+        $user = User::where('telegram_id', $telegramId)->first();
 
-        foreach ($totals as $row) {
-            $cat = $categories->get($row->category_id);
-            $catName = $cat ? $cat->icon . ' ' . $cat->name : '🤷 Без категории';
-            $sum = number_format($row->total / 100, 2, '.', ' ') . " {$currency}";
-            $text .= "{$catName}: <b>{$sum}</b>\n";
+        if (!$user || !$user->current_wallet_id) {
+            $this->chat->html("Пользователь не найден.")->send();
+            return;
         }
 
-        // 2. Считаем суммы по способу оплаты
-        $paymentTotals = \App\Models\Transaction::select('payment_method', \Illuminate\Support\Facades\DB::raw('SUM(amount) as total'))
-            ->where('wallet_id', $walletId)
-            ->where('type', 'expense')
-            ->where('purchased_at', '>=', $startOfMonth)
-            ->groupBy('payment_method')
-            ->pluck('total', 'payment_method');
+        $payload = $this->generateReportPayload($user->current_wallet_id, $year, $month);
 
-        $cashSum = ($paymentTotals->get('cash', 0)) / 100;
-        $cardSum = ($paymentTotals->get('card', 0)) / 100;
-        $unknownSum = ($paymentTotals->get('unknown', 0)) / 100;
-
-        $text .= "\n💳 <b>Способы оплаты:</b>\n";
-        if ($cashSum > 0) $text .= "💵 Наличными: <b>" . number_format($cashSum, 2, '.', ' ') . " {$currency}</b>\n";
-        if ($cardSum > 0) $text .= "💳 Картой: <b>" . number_format($cardSum, 2, '.', ' ') . " {$currency}</b>\n";
-        if ($unknownSum > 0) $text .= "❓ Неизвестно: <b>" . number_format($unknownSum, 2, '.', ' ') . " {$currency}</b>\n";
-
-        // 3. Итоговая сумма
-        $formattedTotal = number_format($totalSum, 2, '.', ' ') . " {$currency}";
-        $text .= "\nИтого потрачено: <b>{$formattedTotal}</b>";
-
-        $this->chat->html($text)->send();
+        $this->chat->edit($this->messageId)
+            ->html($payload['text'])
+            ->keyboard($payload['keyboard'])
+            ->send();
     }
 
+    /**
+     * Вспомогательный метод: собирает текст отчета и клавиатуру для выбранного месяца
+     */
+    private function generateReportPayload(int $walletId, int $year, int $month): array
+    {
+        Carbon::setLocale('ru');
+
+        $date = Carbon::create($year, $month, 1);
+        $startOfMonth = $date->copy()->startOfMonth();
+        $endOfMonth = $date->copy()->endOfMonth();
+
+        $wallet = \App\Models\Wallet::find($walletId);
+        $currency = $wallet->currency ?? '€';
+
+        $totals = \App\Models\Transaction::select('category_id', DB::raw('SUM(amount) as total'))
+            ->where('wallet_id', $walletId)
+            ->where('type', 'expense')
+            ->whereBetween('purchased_at', [$startOfMonth, $endOfMonth])
+            ->groupBy('category_id')
+            ->get();
+
+        $monthName = mb_convert_case($date->translatedFormat('F Y'), MB_CASE_TITLE, 'UTF-8');
+        $text = "📊 <b>Отчет за {$monthName}:</b>\n\n";
+
+        if ($totals->isEmpty()) {
+            $text .= "В этом месяце трат не найдено! 💸\n";
+        } else {
+            $totalSum = $totals->sum('total') / 100;
+            $categoryIds = $totals->pluck('category_id')->filter();
+            $categories = \App\Models\Category::whereIn('id', $categoryIds)->get()->keyBy('id');
+
+            foreach ($totals as $row) {
+                $cat = $categories->get($row->category_id);
+                $catName = $cat ? $cat->icon . ' ' . $cat->name : '🤷 Без категории';
+                $sum = number_format($row->total / 100, 2, '.', ' ') . " {$currency}";
+                $text .= "{$catName}: <b>{$sum}</b>\n";
+            }
+
+            $paymentTotals = \App\Models\Transaction::select('payment_method', DB::raw('SUM(amount) as total'))
+                ->where('wallet_id', $walletId)
+                ->where('type', 'expense')
+                ->whereBetween('purchased_at', [$startOfMonth, $endOfMonth])
+                ->groupBy('payment_method')
+                ->pluck('total', 'payment_method');
+
+            $cashSum = ($paymentTotals->get('cash', 0)) / 100;
+            $cardSum = ($paymentTotals->get('card', 0)) / 100;
+            $unknownSum = ($paymentTotals->get('unknown', 0)) / 100;
+
+            $text .= "\n💳 <b>Способы оплаты:</b>\n";
+            if ($cashSum > 0) $text .= "💵 Наличными: <b>" . number_format($cashSum, 2, '.', ' ') . " {$currency}</b>\n";
+            if ($cardSum > 0) $text .= "💳 Картой: <b>" . number_format($cardSum, 2, '.', ' ') . " {$currency}</b>\n";
+            if ($unknownSum > 0) $text .= "❓ Неизвестно: <b>" . number_format($unknownSum, 2, '.', ' ') . " {$currency}</b>\n";
+
+            $formattedTotal = number_format($totalSum, 2, '.', ' ') . " {$currency}";
+            $text .= "\nИтого потрачено: <b>{$formattedTotal}</b>";
+        }
+
+        $prev = $date->copy()->subMonth();
+        $next = $date->copy()->addMonth();
+        $now = now();
+
+        $buttons = [];
+
+        $buttons[] = Button::make('⬅️ ' . mb_convert_case($prev->translatedFormat('M'), MB_CASE_TITLE, 'UTF-8'))
+            ->action('changeReportMonth')
+            ->param('y', $prev->year)
+            ->param('m', $prev->month);
+
+        if ($date->format('Y-m') !== $now->format('Y-m')) {
+            $buttons[] = Button::make(mb_convert_case($next->translatedFormat('M'), MB_CASE_TITLE, 'UTF-8') . ' ➡️')
+                ->action('changeReportMonth')
+                ->param('y', $next->year)
+                ->param('m', $next->month);
+        }
+
+        $keyboard = Keyboard::make()->row($buttons);
+
+        return [
+            'text' => $text,
+            'keyboard' => $keyboard
+        ];
+    }
     public function stores(): void
     {
+        if (!$this->isUserAllowed()) {
+            $this->rejectAccess();
+            return;
+        }
+
         $user = User::where('telegram_id', $this->message?->from()?->id())->first();
 
         if (!$user || !$user->current_wallet_id) {
@@ -223,59 +337,132 @@ class BudgetBotHandler extends WebhookHandler
             return;
         }
 
-        // Получаем текущий кошелек и его валюту (по умолчанию '€')
-        $wallet = \App\Models\Wallet::find($user->current_wallet_id);
-        $currency = $wallet->currency ?? '€';
+        // Запрашиваем отчет по магазинам за текущий месяц по умолчанию
+        $now = now();
+        $payload = $this->generateStoresPayload($user->current_wallet_id, $now->year, $now->month);
 
-        $startOfMonth = now()->startOfMonth();
+        $this->chat->html($payload['text'])
+            ->keyboard($payload['keyboard'])
+            ->send();
+    }
 
-        $transactions = \App\Models\Transaction::where('wallet_id', $user->current_wallet_id)
-            ->where('type', 'expense')
-            ->where('purchased_at', '>=', $startOfMonth)
-            ->get();
-
-        if ($transactions->isEmpty()) {
-            $this->chat->html("В этом месяце еще нет расходов! 💸")->send();
+    /**
+     * Обработчик нажатия на кнопки "Вперед/Назад" по месяцам для МАГАЗИНОВ
+     */
+    public function changeStoresMonth(): void
+    {
+        if (!$this->isUserAllowed()) {
+            $this->rejectAccess();
             return;
         }
 
-        $storeTotals = [];
-        $totalSum = 0;
+        $year = (int) $this->data->get('y');
+        $month = (int) $this->data->get('m');
 
-        foreach ($transactions as $transaction) {
-            $metadata = is_array($transaction->ai_metadata) ? $transaction->ai_metadata : json_decode($transaction->ai_metadata ?? '{}', true);
+        $telegramId = $this->callbackQuery?->from()?->id() ?? $this->message?->from()?->id();
+        $user = User::where('telegram_id', $telegramId)->first();
 
-            $store = $metadata['store'] ?? 'Разное / Вручную';
+        if (!$user || !$user->current_wallet_id) {
+            $this->chat->html("Пользователь не найден.")->send();
+            return;
+        }
 
-            if (!isset($storeTotals[$store])) {
-                $storeTotals[$store] = 0;
+        $payload = $this->generateStoresPayload($user->current_wallet_id, $year, $month);
+
+        $this->chat->edit($this->messageId)
+            ->html($payload['text'])
+            ->keyboard($payload['keyboard'])
+            ->send();
+    }
+
+    /**
+     * Вспомогательный метод: собирает текст и клавиатуру для выбранного месяца (МАГАЗИНЫ)
+     */
+    private function generateStoresPayload(int $walletId, int $year, int $month): array
+    {
+        Carbon::setLocale('ru');
+
+        $date = Carbon::create($year, $month, 1);
+        $startOfMonth = $date->copy()->startOfMonth();
+        $endOfMonth = $date->copy()->endOfMonth();
+
+        $wallet = \App\Models\Wallet::find($walletId);
+        $currency = $wallet->currency ?? '€';
+
+        // Берем транзакции строго за выбранный месяц
+        $transactions = \App\Models\Transaction::where('wallet_id', $walletId)
+            ->where('type', 'expense')
+            ->whereBetween('purchased_at', [$startOfMonth, $endOfMonth])
+            ->get();
+
+        $monthName = mb_convert_case($date->translatedFormat('F Y'), MB_CASE_TITLE, 'UTF-8');
+        $text = "🏪 <b>Траты по магазинам за {$monthName}:</b>\n\n";
+
+        if ($transactions->isEmpty()) {
+            $text .= "В этом месяце еще нет расходов! 💸\n";
+        } else {
+            $storeTotals = [];
+            $totalSum = 0;
+
+            foreach ($transactions as $transaction) {
+                $metadata = is_array($transaction->ai_metadata) ? $transaction->ai_metadata : json_decode($transaction->ai_metadata ?? '{}', true);
+
+                // Учитываем оба варианта ключа (на всякий случай)
+                $store = $metadata['store'] ?? $metadata['store_name'] ?? 'Разное / Вручную';
+
+                if (!isset($storeTotals[$store])) {
+                    $storeTotals[$store] = 0;
+                }
+
+                $storeTotals[$store] += $transaction->amount;
+                $totalSum += $transaction->amount;
             }
 
-            $storeTotals[$store] += $transaction->amount;
-            $totalSum += $transaction->amount;
+            arsort($storeTotals);
+
+            foreach ($storeTotals as $store => $amount) {
+                $sum = number_format($amount / 100, 2, '.', ' ') . " {$currency}";
+                $icon = $store === 'Разное / Вручную' ? '✍️' : '🏬';
+                $text .= "{$icon} {$store}: <b>{$sum}</b>\n";
+            }
+
+            $formattedTotal = number_format($totalSum / 100, 2, '.', ' ') . " {$currency}";
+            $text .= "\nИтого: <b>{$formattedTotal}</b>";
         }
 
-        // Сортируем магазины от самых больших трат к самым маленьким
-        arsort($storeTotals);
+        $prev = $date->copy()->subMonth();
+        $next = $date->copy()->addMonth();
+        $now = now();
 
-        $text = "🏪 <b>Траты по магазинам за месяц:</b>\n\n";
+        $buttons = [];
 
-        foreach ($storeTotals as $store => $amount) {
-            // Добавляем валюту к сумме по магазину
-            $sum = number_format($amount / 100, 2, '.', ' ') . " {$currency}";
-            $icon = $store === 'Разное / Вручную' ? '✍️' : '🏬';
-            $text .= "{$icon} {$store}: <b>{$sum}</b>\n";
+        $buttons[] = Button::make('⬅️ ' . mb_convert_case($prev->translatedFormat('M'), MB_CASE_TITLE, 'UTF-8'))
+            ->action('changeStoresMonth')
+            ->param('y', $prev->year)
+            ->param('m', $prev->month);
+
+        if ($date->format('Y-m') !== $now->format('Y-m')) {
+            $buttons[] = Button::make(mb_convert_case($next->translatedFormat('M'), MB_CASE_TITLE, 'UTF-8') . ' ➡️')
+                ->action('changeStoresMonth')
+                ->param('y', $next->year)
+                ->param('m', $next->month);
         }
 
-        // Добавляем валюту к итоговой сумме
-        $formattedTotal = number_format($totalSum / 100, 2, '.', ' ') . " {$currency}";
-        $text .= "\nИтого: <b>{$formattedTotal}</b>";
+        $keyboard = Keyboard::make()->row($buttons);
 
-        $this->chat->html($text)->send();
+        return [
+            'text' => $text,
+            'keyboard' => $keyboard
+        ];
     }
 
     public function invite(): void
     {
+        if (!$this->isUserAllowed()) {
+            $this->rejectAccess();
+            return;
+        }
+
         $user = User::where('telegram_id', $this->message?->from()?->id())->first();
 
         if (!$user || !$user->current_wallet_id) {
@@ -290,8 +477,12 @@ class BudgetBotHandler extends WebhookHandler
 
     public function join(): void
     {
+
+        if (!$this->isUserAllowed()) {
+            $this->rejectAccess();
+            return;
+        }
         $text = $this->message?->text();
-        // Вырезаем команду из текста, чтобы получить сам токен
         $token = trim(str_replace('/join', '', $text));
 
         if (empty($token)) {
@@ -331,6 +522,11 @@ class BudgetBotHandler extends WebhookHandler
 
     public function undo(): void
     {
+        if (!$this->isUserAllowed()) {
+            $this->rejectAccess();
+            return;
+        }
+
         $user = User::where('telegram_id', $this->message?->from()?->id())->first();
 
         if (!$user || !$user->current_wallet_id) {
@@ -360,6 +556,11 @@ class BudgetBotHandler extends WebhookHandler
 
     public function confirmUndo(): void
     {
+        if (!$this->isUserAllowed()) {
+            $this->rejectAccess();
+            return;
+        }
+
         $transactionId = $this->data->get('id');
         $batchId = $this->data->get('batch_id');
 
@@ -383,11 +584,21 @@ class BudgetBotHandler extends WebhookHandler
 
     public function cancelUndo(): void
     {
+        if (!$this->isUserAllowed()) {
+            $this->rejectAccess();
+            return;
+        }
+
         $this->chat->edit($this->messageId)->html("🛡 Действие отменено. Запись оставлена в бюджете.")->send();
     }
 
     public function currency(): void
     {
+        if (!$this->isUserAllowed()) {
+            $this->rejectAccess();
+            return;
+        }
+
         $user = User::where('telegram_id', $this->message?->from()?->id())->first();
 
         if (!$user || !$user->current_wallet_id) {
@@ -406,6 +617,11 @@ class BudgetBotHandler extends WebhookHandler
 
     public function setCurrency(): void
     {
+        if (!$this->isUserAllowed()) {
+            $this->rejectAccess();
+            return;
+        }
+
         $currencySign = $this->data->get('c');
         $user = User::where('telegram_id', $this->chat->chat_id)->first();
 
@@ -466,6 +682,11 @@ class BudgetBotHandler extends WebhookHandler
      */
     public function updatePayment(): void
     {
+        if (!$this->isUserAllowed()) {
+            $this->rejectAccess();
+            return;
+        }
+
         $method = $this->data->get('method');
         $cacheKey = $this->data->get('key');
         $ids = \Illuminate\Support\Facades\Cache::get($cacheKey);

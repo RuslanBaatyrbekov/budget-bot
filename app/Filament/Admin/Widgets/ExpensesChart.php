@@ -28,6 +28,7 @@ class ExpensesChart extends ChartWidget
 
     protected function getData(): array
     {
+        $walletId = session('active_wallet_id') ?? auth()->user()?->current_wallet_id;
         $activeFilter = $this->filter;
 
         $startDate = match ($activeFilter) {
@@ -37,7 +38,9 @@ class ExpensesChart extends ChartWidget
             default => Carbon::today()->subMonth(),
         };
 
-        $query = Trend::model(Transaction::class)
+        $query = Trend::query(
+            Transaction::where('wallet_id', $walletId)
+        )
             ->dateColumn('purchased_at')
             ->between(start: $startDate, end: Carbon::now());
 

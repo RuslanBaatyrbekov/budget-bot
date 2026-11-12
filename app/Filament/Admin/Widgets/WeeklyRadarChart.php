@@ -11,14 +11,18 @@ class WeeklyRadarChart extends ChartWidget
 {
     protected static ?string $heading = 'Траты по дням недели';
     protected static ?int $sort = 4;
+
     protected function getData(): array
     {
+        $walletId = session('active_wallet_id') ?? auth()->user()?->current_wallet_id;
         $startOfMonth = Carbon::now()->startOfMonth();
         $endOfMonth = Carbon::now()->endOfMonth();
+
         $transactions = Transaction::select(
             DB::raw('DAYOFWEEK(purchased_at) as day_of_week'),
             DB::raw('SUM(amount) as total')
         )
+            ->where('wallet_id', $walletId)
             ->where('type', 'expense')
             ->whereBetween('purchased_at', [$startOfMonth, $endOfMonth])
             ->groupBy('day_of_week')
@@ -37,7 +41,7 @@ class WeeklyRadarChart extends ChartWidget
         return [
             'datasets' => [
                 [
-                    'label' => 'Потрачено (€)',
+                    'label' => 'Потрачено',
                     'data' => $data,
                     'backgroundColor' => 'rgba(139, 92, 246, 0.2)',
                     'borderColor' => '#8b5cf6',

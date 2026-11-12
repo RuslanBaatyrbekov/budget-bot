@@ -15,9 +15,11 @@ class StoreExpensesChart extends ChartWidget
 
     protected function getData(): array
     {
+        $walletId = session('active_wallet_id') ?? auth()->user()?->current_wallet_id;
         $startOfMonth = Carbon::now()->startOfMonth();
 
-        $transactions = Transaction::where('type', 'expense')
+        $transactions = Transaction::where('wallet_id', $walletId)
+            ->where('type', 'expense')
             ->where('purchased_at', '>=', $startOfMonth)
             ->get();
 

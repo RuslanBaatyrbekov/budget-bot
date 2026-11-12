@@ -60,7 +60,14 @@ class ParseReceiptJob implements ShouldQueue
             \"amount\" (число),
             \"description\" (название),
             \"category_name\" (категория на русском. ВАЖНО: используй одну из существующих [{$categoriesList}] ТОЛЬКО если она идеально подходит по смыслу. Если товар туда не вписывается, ОБЯЗАТЕЛЬНО придумай новую точную категорию, например 'Бытовая химия', 'Аптека', 'Красота и уход', 'Одежда'),
-            \"category_icon\" (один максимально подходящий эмодзи).";
+            \"category_icon\" (один максимально подходящий эмодзи). Дополни все совими словами";
+
+
+
+
+
+
+
             $geminiResponse = Http::timeout(45)->post("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key={$apiKey}", [
                 'contents' => [[
                     'parts' => [

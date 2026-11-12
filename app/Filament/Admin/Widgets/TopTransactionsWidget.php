@@ -16,11 +16,14 @@ class TopTransactionsWidget extends BaseWidget
 
     public function table(Table $table): Table
     {
-        $currency = Wallet::first()->currency ?? 'сом';
+        $walletId = session('active_wallet_id') ?? auth()->user()?->current_wallet_id;
+        $wallet = Wallet::find($walletId);
+        $currency = $wallet?->currency ?? 'сом';
 
         return $table
             ->query(
                 Transaction::query()
+                    ->where('wallet_id', $walletId)
                     ->where('type', 'expense')
                     ->where('purchased_at', '>=', now()->startOfMonth())
                     ->orderByDesc('amount')
