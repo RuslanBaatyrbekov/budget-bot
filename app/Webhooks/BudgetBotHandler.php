@@ -2,705 +2,552 @@
 
 namespace App\Webhooks;
 
-use App\Models\User;
-use App\Models\Wallet;
+use App\Jobs\ParseReceiptJob;
+use App\Jobs\ParseTextJob;
+use App\Jobs\ParseVoiceJob;
 use App\Models\Category;
 use App\Models\Transaction;
+use App\Models\User;
+use App\Models\Wallet;
+use App\Services\BudgetService;
+use App\Services\CsvExporter;
+use App\Services\RecurringPaymentService;
+use App\Services\ReportService;
+use App\Services\WalletService;
+use App\Support\Html;
+use App\Support\Money;
+use App\Telegram\Keyboards;
+use App\Telegram\Messages;
+use DefStudio\Telegraph\DTO\User as TelegramUser;
 use DefStudio\Telegraph\Handlers\WebhookHandler;
 use DefStudio\Telegraph\Keyboard\Button;
 use DefStudio\Telegraph\Keyboard\Keyboard;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\URL;
 use Illuminate\Support\Str;
 use Illuminate\Support\Stringable;
-use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Carbon;
 
+/**
+ * Commands are public methods (/report → report()), inline buttons call the short
+ * public methods below (pay, del, rep...). Every update passes through guard() first.
+ */
 class BudgetBotHandler extends WebhookHandler
 {
-    /**
-     * Проверяет, разрешено ли текущему пользователю использовать бота
-     */
-    private function isUserAllowed(): bool
-    {
-        $allowedString = env('ALLOWED_TELEGRAM_USERS', '');
+    private ?TelegramUser $from = null;
 
-        if (empty(trim($allowedString))) {
-            return true;
-        }
+    private ?User $user = null;
 
-        $allowedUsers = array_filter(array_map('trim', explode(',', $allowedString)));
-        $currentUserId = (string) ($this->message?->from()?->id() ?? $this->callbackQuery?->from()?->id());
-
-        return in_array($currentUserId, $allowedUsers, true);
-    }
-
-    /**
-     * Отправляет сообщение с отказом и ссылкой на GitHub
-     */
-    private function rejectAccess(): void
-    {
-        $this->chat->html(
-            "Привет! 👋 Это приватный бот для ведения семейного бюджета.\n\n" .
-            "Хочешь такого же? Проект полностью бесплатный и открытый! " .
-            "Ты можешь в пару кликов развернуть его для своей семьи.\n\n" .
-            "Исходный код и инструкция тут: <a href='https://github.com/RuslanBaatyrbekov/budget-bot'>GitHub - AI Budget Tracker</a> 🚀"
-        )->send();
-    }
-    public function start(): void
-    {
-        if (!$this->isUserAllowed()) {
-            $this->rejectAccess();
-            return;
-        }
-        $telegramId = $this->message?->from()?->id();
-        $firstName = $this->message?->from()?->firstName() ?? 'Пользователь';
-
-        if (!$telegramId) {
-            $this->chat->html("Упс, не смог получить твой Telegram ID.")->send();
-            return;
-        }
-
-        $user = User::firstOrCreate(
-            ['telegram_id' => $telegramId],
-            [
-                'name' => $firstName,
-                'email' => $telegramId . '@telegram.bot',
-                'password' => bcrypt(Str::random(16)),
-            ]
-        );
-
-        if (!$user->current_wallet_id) {
-            $wallet = Wallet::create(['name' => 'Семейный бюджет']);
-            $user->wallets()->attach($wallet->id, ['role' => 'owner']);
-            $user->current_wallet_id = $wallet->id;
-            $user->save();
-
-            $defaultCategories = [
-                ['name' => 'Продукты', 'icon' => '🛒', 'type' => 'expense'],
-                ['name' => 'Авто / W124', 'icon' => '🚗', 'type' => 'expense'],
-                ['name' => 'Электроника / ESP32', 'icon' => '🔌', 'type' => 'expense'],
-                ['name' => 'Фастфуд / Glovo', 'icon' => '🍔', 'type' => 'expense'],
-                ['name' => 'Зарплата', 'icon' => '💵', 'type' => 'income'],
-            ];
-
-            foreach ($defaultCategories as $category) {
-                $wallet->categories()->create($category);
-            }
-        }
-
-        $this->chat->html("Привет, <b>{$firstName}</b>! 👋\n\nОтправь мне текст (например, <code>3 евро за книгу</code>) или фото чека.")->send();
-    }
+    // ---------------------------------------------------------------- access
 
     protected function handleMessage(): void
     {
-        if (!$this->isUserAllowed()) {
-            $this->rejectAccess();
-            return;
-        }
-
-        $text = $this->message?->text();
-
-        if ($text !== null && str_starts_with($text, '/')) {
+        if ($this->guard()) {
             parent::handleMessage();
-            return;
         }
-
-        $user = User::where('telegram_id', $this->message?->from()?->id())->first();
-
-        if (!$user || !$user->current_wallet_id) {
-            $this->chat->html("Сначала отправь /start!")->send();
-            return;
-        }
-
-        if ($this->message?->photos()?->isNotEmpty()) {
-            $this->processReceipt($user);
-            return;
-        }
-
-        if ($this->message?->voice() !== null) {
-            $this->handleVoiceMessage($user, $this->message->voice()->id());
-            return;
-        }
-
-        if ($text !== null) {
-            $this->handleChatMessage(new Stringable($text));
-            return;
-        }
-
-        $this->chat->html("Я пока понимаю только текст, фото чеков и голосовые сообщения!")->send();
     }
 
-
-    protected function processReceipt(User $user): void
+    protected function handleCallbackQuery(): void
     {
-        $photo = $this->message->photos()->last();
-        $botToken = $this->bot->token;
-
-        $this->chat->html("Производится анализ чека...")->send();
-
-        \App\Jobs\ParseReceiptJob::dispatch($user, $photo->id(), $this->chat, $botToken);
+        if ($this->guard()) {
+            parent::handleCallbackQuery();
+        }
     }
 
-    protected function saveTransaction(User $user, float $amount, string $description, ?Category $category = null, array $aiMetadata = null, bool $silent = false, ?string $purchasedAt = null, string $paymentMethod = 'unknown'): Transaction
+    private function guard(): bool
     {
-        $transaction = $user->transactions()->create([
-            'wallet_id' => $user->current_wallet_id,
-            'category_id' => $category?->id,
-            'amount' => (int) round($amount * 100),
-            'type' => 'expense',
-            'description' => $description,
-            'ai_metadata' => $aiMetadata,
-            'payment_method' => $paymentMethod,
-            'transaction_date' => now(),
-            'purchased_at' => $purchasedAt ? Carbon::parse($purchasedAt) : now(),
-        ]);
-
-        if (!$silent) {
-            $wallet = Wallet::find($user->current_wallet_id);
-            $currency = $wallet->currency ?? '€';
-            $categoryName = $category ? $category->icon . ' ' . $category->name : '🤷 Без категории';
-            $this->chat->html("✅ Записал расход!\n💰 Сумма: <b>" . number_format($amount, 2, '.', ' ') . " {$currency}</b>\n📝 <i>{$description}</i>\n📁 {$categoryName}")->send();
+        // Telegram re-delivers updates when we answer slowly: process each one once.
+        $updateId = $this->request->input('update_id');
+        if ($updateId !== null && ! Cache::add("tg-update:{$this->bot->id}:{$updateId}", true, now()->addDay())) {
+            return false;
         }
 
-        return $transaction;
-    }
+        $this->from = $this->message?->from() ?? $this->callbackQuery?->from();
 
-    public function setPaymentMethod(): void
-    {
-        if (!$this->isUserAllowed()) {
+        if ($this->from === null || $this->from->isBot()) {
+            return false;
+        }
+
+        if (! in_array((string) $this->from->id(), config('budget.allowed_users'), true)) {
             $this->rejectAccess();
+
+            return false;
+        }
+
+        $this->user = User::with('currentWallet')->where('telegram_id', $this->from->id())->first();
+
+        return true;
+    }
+
+    private function rejectAccess(): void
+    {
+        if ($this->callbackQuery !== null) {
+            $this->reply('Нет доступа');
+
             return;
         }
 
-        $method = $this->data->get('method');
-        $batchId = $this->data->get('batch_id');
-        $transactionId = $this->data->get('id');
-
-        $methodName = $method === 'cash' ? '💵 Наличные' : '💳 Карта';
-
-        if ($batchId) {
-            Transaction::where('ai_metadata->batch_id', $batchId)->update(['payment_method' => $method]);
-        } elseif ($transactionId) {
-            Transaction::where('id', $transactionId)->update(['payment_method' => $method]);
+        if ($this->message?->chat()?->type() !== 'private') {
+            return;
         }
 
-        $this->chat->edit($this->messageId)->html("✅ Способ оплаты сохранен: <b>{$methodName}</b>")->send();
+        $this->chat->html(
+            "Привет! 👋 Это приватный бот для семейного бюджета.\n\n"
+            ."Хочешь такой же? Проект бесплатный и открытый — его можно развернуть для своей семьи:\n"
+            ."<a href=\"https://github.com/RuslanBaatyrbekov/budget-bot\">GitHub · AI Budget Bot</a> 🚀\n\n"
+            .'Твой Telegram ID: <code>'.$this->from->id().'</code>'
+        )->send();
+    }
+
+    private function wallet(): ?Wallet
+    {
+        $wallet = $this->user?->currentWallet;
+
+        if ($wallet === null) {
+            $this->chat->html('Сначала отправь /start 🙂')->send();
+        }
+
+        return $wallet;
+    }
+
+    private function isCallback(): bool
+    {
+        return $this->callbackQuery !== null;
+    }
+
+    /**
+     * Transactions of a batch, but only if they belong to one of the user's wallets.
+     *
+     * @return Collection<int, Transaction>
+     */
+    private function ownBatch(string $batchId): Collection
+    {
+        if ($this->user === null || $batchId === '') {
+            return collect();
+        }
+
+        return Transaction::where('batch_id', $batchId)
+            ->whereIn('wallet_id', $this->user->wallets()->pluck('wallets.id'))
+            ->get();
+    }
+
+    // ---------------------------------------------------------------- messages
+
+    protected function handleChatMessage(Stringable $text): void
+    {
+        $wallet = $this->wallet();
+        if ($wallet === null) {
+            return;
+        }
+
+        $chatId = $this->chat->id;
+        $document = $this->message?->document();
+        $voice = $this->message?->voice();
+
+        if ($this->message?->photos()->isNotEmpty()) {
+            ParseReceiptJob::dispatch($this->user->id, $chatId, $this->message->photos()->last()->id());
+            $this->chat->html('📸 Разбираю чек…')->send();
+
+            return;
+        }
+
+        if ($document !== null && $this->isReceiptFile($document->mimeType())) {
+            ParseReceiptJob::dispatch($this->user->id, $chatId, $document->id(), $document->mimeType());
+            $this->chat->html('📄 Разбираю чек…')->send();
+
+            return;
+        }
+
+        if ($voice !== null) {
+            if ($voice->duration() > config('budget.max_voice_seconds')) {
+                $this->chat->html('🎙 Слишком длинное голосовое, уложись в 3 минуты.')->send();
+
+                return;
+            }
+
+            ParseVoiceJob::dispatch($this->user->id, $chatId, $voice->id());
+            $this->chat->html('🎙 Слушаю…')->send();
+
+            return;
+        }
+
+        if ($text->trim()->isNotEmpty()) {
+            ParseTextJob::dispatch($this->user->id, $chatId, (string) $text->trim()->limit(1000));
+            $this->chat->html('⏳ Записываю…')->send();
+
+            return;
+        }
+
+        $this->chat->html('Я понимаю текст, фото чеков и голосовые. /help — подсказка.')->send();
+    }
+
+    private function isReceiptFile(?string $mime): bool
+    {
+        return in_array($mime, ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'], true);
+    }
+
+    // ---------------------------------------------------------------- commands
+
+    public function start(): void
+    {
+        $this->user ??= User::fromTelegram($this->from->id(), $this->from->firstName() ?: 'Пользователь');
+        $wallet = app(WalletService::class)->ensureWallet($this->user);
+
+        $this->chat->html(
+            'Привет, <b>'.Html::e($this->user->name).'</b>! 👋 Кошелёк: <b>'.Html::e($wallet->name)."</b>\n\n".Messages::help()
+        )->send();
+    }
+
+    public function help(): void
+    {
+        $this->chat->html(Messages::help())->send();
     }
 
     public function report(): void
     {
-        if (!$this->isUserAllowed()) {
-            $this->rejectAccess();
-            return;
+        if ($wallet = $this->wallet()) {
+            $this->sendMonthly('rep', $wallet, now());
         }
-
-        $user = User::where('telegram_id', $this->message?->from()?->id())->first();
-
-        if (!$user || !$user->current_wallet_id) {
-            $this->chat->html("Сначала отправь /start, чтобы я настроил твой профиль!")->send();
-            return;
-        }
-
-        // Запрашиваем отчет за текущий месяц по умолчанию
-        $now = now();
-        $payload = $this->generateReportPayload($user->current_wallet_id, $now->year, $now->month);
-
-        $this->chat->html($payload['text'])
-            ->keyboard($payload['keyboard'])
-            ->send();
     }
 
-    /**
-     * Обработчик нажатия на кнопки "Вперед/Назад" по месяцам
-     */
-    public function changeReportMonth(): void
-    {
-        if (!$this->isUserAllowed()) {
-            $this->rejectAccess();
-            return;
-        }
-
-        $year = (int) $this->data->get('y');
-        $month = (int) $this->data->get('m');
-
-        $telegramId = $this->callbackQuery?->from()?->id() ?? $this->message?->from()?->id();
-        $user = User::where('telegram_id', $telegramId)->first();
-
-        if (!$user || !$user->current_wallet_id) {
-            $this->chat->html("Пользователь не найден.")->send();
-            return;
-        }
-
-        $payload = $this->generateReportPayload($user->current_wallet_id, $year, $month);
-
-        $this->chat->edit($this->messageId)
-            ->html($payload['text'])
-            ->keyboard($payload['keyboard'])
-            ->send();
-    }
-
-    /**
-     * Вспомогательный метод: собирает текст отчета и клавиатуру для выбранного месяца
-     */
-    private function generateReportPayload(int $walletId, int $year, int $month): array
-    {
-        Carbon::setLocale('ru');
-
-        $date = Carbon::create($year, $month, 1);
-        $startOfMonth = $date->copy()->startOfMonth();
-        $endOfMonth = $date->copy()->endOfMonth();
-
-        $wallet = \App\Models\Wallet::find($walletId);
-        $currency = $wallet->currency ?? '€';
-
-        $totals = \App\Models\Transaction::select('category_id', DB::raw('SUM(amount) as total'))
-            ->where('wallet_id', $walletId)
-            ->where('type', 'expense')
-            ->whereBetween('purchased_at', [$startOfMonth, $endOfMonth])
-            ->groupBy('category_id')
-            ->get();
-
-        $monthName = mb_convert_case($date->translatedFormat('F Y'), MB_CASE_TITLE, 'UTF-8');
-        $text = "📊 <b>Отчет за {$monthName}:</b>\n\n";
-
-        if ($totals->isEmpty()) {
-            $text .= "В этом месяце трат не найдено! 💸\n";
-        } else {
-            $totalSum = $totals->sum('total') / 100;
-            $categoryIds = $totals->pluck('category_id')->filter();
-            $categories = \App\Models\Category::whereIn('id', $categoryIds)->get()->keyBy('id');
-
-            foreach ($totals as $row) {
-                $cat = $categories->get($row->category_id);
-                $catName = $cat ? $cat->icon . ' ' . $cat->name : '🤷 Без категории';
-                $sum = number_format($row->total / 100, 2, '.', ' ') . " {$currency}";
-                $text .= "{$catName}: <b>{$sum}</b>\n";
-            }
-
-            $paymentTotals = \App\Models\Transaction::select('payment_method', DB::raw('SUM(amount) as total'))
-                ->where('wallet_id', $walletId)
-                ->where('type', 'expense')
-                ->whereBetween('purchased_at', [$startOfMonth, $endOfMonth])
-                ->groupBy('payment_method')
-                ->pluck('total', 'payment_method');
-
-            $cashSum = ($paymentTotals->get('cash', 0)) / 100;
-            $cardSum = ($paymentTotals->get('card', 0)) / 100;
-            $unknownSum = ($paymentTotals->get('unknown', 0)) / 100;
-
-            $text .= "\n💳 <b>Способы оплаты:</b>\n";
-            if ($cashSum > 0) $text .= "💵 Наличными: <b>" . number_format($cashSum, 2, '.', ' ') . " {$currency}</b>\n";
-            if ($cardSum > 0) $text .= "💳 Картой: <b>" . number_format($cardSum, 2, '.', ' ') . " {$currency}</b>\n";
-            if ($unknownSum > 0) $text .= "❓ Неизвестно: <b>" . number_format($unknownSum, 2, '.', ' ') . " {$currency}</b>\n";
-
-            $formattedTotal = number_format($totalSum, 2, '.', ' ') . " {$currency}";
-            $text .= "\nИтого потрачено: <b>{$formattedTotal}</b>";
-        }
-
-        $prev = $date->copy()->subMonth();
-        $next = $date->copy()->addMonth();
-        $now = now();
-
-        $buttons = [];
-
-        $buttons[] = Button::make('⬅️ ' . mb_convert_case($prev->translatedFormat('M'), MB_CASE_TITLE, 'UTF-8'))
-            ->action('changeReportMonth')
-            ->param('y', $prev->year)
-            ->param('m', $prev->month);
-
-        if ($date->format('Y-m') !== $now->format('Y-m')) {
-            $buttons[] = Button::make(mb_convert_case($next->translatedFormat('M'), MB_CASE_TITLE, 'UTF-8') . ' ➡️')
-                ->action('changeReportMonth')
-                ->param('y', $next->year)
-                ->param('m', $next->month);
-        }
-
-        $keyboard = Keyboard::make()->row($buttons);
-
-        return [
-            'text' => $text,
-            'keyboard' => $keyboard
-        ];
-    }
     public function stores(): void
     {
-        if (!$this->isUserAllowed()) {
-            $this->rejectAccess();
-            return;
+        if ($wallet = $this->wallet()) {
+            $this->sendMonthly('sto', $wallet, now());
         }
-
-        $user = User::where('telegram_id', $this->message?->from()?->id())->first();
-
-        if (!$user || !$user->current_wallet_id) {
-            $this->chat->html("Сначала отправь /start!")->send();
-            return;
-        }
-
-        // Запрашиваем отчет по магазинам за текущий месяц по умолчанию
-        $now = now();
-        $payload = $this->generateStoresPayload($user->current_wallet_id, $now->year, $now->month);
-
-        $this->chat->html($payload['text'])
-            ->keyboard($payload['keyboard'])
-            ->send();
     }
 
-    /**
-     * Обработчик нажатия на кнопки "Вперед/Назад" по месяцам для МАГАЗИНОВ
-     */
-    public function changeStoresMonth(): void
+    public function limits(): void
     {
-        if (!$this->isUserAllowed()) {
-            $this->rejectAccess();
-            return;
+        if ($wallet = $this->wallet()) {
+            $this->chat->html(Messages::limits($wallet, app(BudgetService::class)->status($wallet)))->send();
         }
-
-        $year = (int) $this->data->get('y');
-        $month = (int) $this->data->get('m');
-
-        $telegramId = $this->callbackQuery?->from()?->id() ?? $this->message?->from()?->id();
-        $user = User::where('telegram_id', $telegramId)->first();
-
-        if (!$user || !$user->current_wallet_id) {
-            $this->chat->html("Пользователь не найден.")->send();
-            return;
-        }
-
-        $payload = $this->generateStoresPayload($user->current_wallet_id, $year, $month);
-
-        $this->chat->edit($this->messageId)
-            ->html($payload['text'])
-            ->keyboard($payload['keyboard'])
-            ->send();
     }
 
-    /**
-     * Вспомогательный метод: собирает текст и клавиатуру для выбранного месяца (МАГАЗИНЫ)
-     */
-    private function generateStoresPayload(int $walletId, int $year, int $month): array
+    /** /limit Продукты 400 · /limit 2000 · /limit Продукты 0 */
+    public function limit(string $parameter = ''): void
     {
-        Carbon::setLocale('ru');
+        $wallet = $this->wallet();
+        if ($wallet === null) {
+            return;
+        }
 
-        $date = Carbon::create($year, $month, 1);
-        $startOfMonth = $date->copy()->startOfMonth();
-        $endOfMonth = $date->copy()->endOfMonth();
+        if (! preg_match('/^(?:(.*\S)\s+)?(\d+(?:[.,]\d{1,2})?)$/u', trim($parameter), $m) || Money::parse($m[2]) === null) {
+            $this->chat->html(Messages::limits($wallet, collect()))->send();
 
-        $wallet = \App\Models\Wallet::find($walletId);
-        $currency = $wallet->currency ?? '€';
+            return;
+        }
 
-        // Берем транзакции строго за выбранный месяц
-        $transactions = \App\Models\Transaction::where('wallet_id', $walletId)
-            ->where('type', 'expense')
-            ->whereBetween('purchased_at', [$startOfMonth, $endOfMonth])
-            ->get();
+        $amount = Money::parse($m[2]);
+        $categoryName = trim($m[1]);
+        $category = null;
 
-        $monthName = mb_convert_case($date->translatedFormat('F Y'), MB_CASE_TITLE, 'UTF-8');
-        $text = "🏪 <b>Траты по магазинам за {$monthName}:</b>\n\n";
+        if ($categoryName !== '') {
+            $category = $this->findCategory($wallet, $categoryName);
 
-        if ($transactions->isEmpty()) {
-            $text .= "В этом месяце еще нет расходов! 💸\n";
-        } else {
-            $storeTotals = [];
-            $totalSum = 0;
+            if ($category === null) {
+                $names = $wallet->categories()->where('type', 'expense')->pluck('name')->map(fn ($n) => Html::e($n))->implode(', ');
+                $this->chat->html('Не нашёл категорию «'.Html::e($categoryName)."».\nЕсть: {$names}")->send();
 
-            foreach ($transactions as $transaction) {
-                $metadata = is_array($transaction->ai_metadata) ? $transaction->ai_metadata : json_decode($transaction->ai_metadata ?? '{}', true);
+                return;
+            }
+        }
 
-                // Учитываем оба варианта ключа (на всякий случай)
-                $store = $metadata['store'] ?? $metadata['store_name'] ?? 'Разное / Вручную';
+        $budget = app(BudgetService::class)->setLimit($wallet, $category, $amount);
+        $label = $category?->label() ?? '📊 Все расходы';
 
-                if (!isset($storeTotals[$store])) {
-                    $storeTotals[$store] = 0;
-                }
+        $this->chat->html($budget
+            ? '🎯 Лимит «'.Html::e($label).'»: <b>'.Money::format($amount, $wallet->currencySign()).'</b> в месяц'
+            : '🗑 Лимит «'.Html::e($label).'» убран'
+        )->send();
+    }
 
-                $storeTotals[$store] += $transaction->amount;
-                $totalSum += $transaction->amount;
+    /** /regular — list · /regular 850 Аренда 1 — add (amount, description, day of month) */
+    public function regular(string $parameter = ''): void
+    {
+        $wallet = $this->wallet();
+        if ($wallet === null) {
+            return;
+        }
+
+        $parameter = trim($parameter);
+
+        if ($parameter !== '') {
+            if (! preg_match('/^(\d+(?:[.,]\d{1,2})?)\s+(.+?)\s+(\d{1,2})$/u', $parameter, $m) || (int) $m[3] < 1 || (int) $m[3] > 31) {
+                $this->chat->html("Формат: <code>/regular сумма описание день</code>\nНапример: <code>/regular 850 Аренда 1</code>")->send();
+
+                return;
             }
 
-            arsort($storeTotals);
+            $payment = app(RecurringPaymentService::class)->add($wallet, $this->user, Money::parse($m[1]), $m[2], (int) $m[3]);
 
-            foreach ($storeTotals as $store => $amount) {
-                $sum = number_format($amount / 100, 2, '.', ' ') . " {$currency}";
-                $icon = $store === 'Разное / Вручную' ? '✍️' : '🏬';
-                $text .= "{$icon} {$store}: <b>{$sum}</b>\n";
-            }
+            $this->chat->html('🔁 Каждое <b>'.$payment->day_of_month.'-е</b> число буду записывать «'
+                .Html::e($payment->description).'» — <b>'.Money::format($payment->amount, $wallet->currencySign()).'</b>')->send();
 
-            $formattedTotal = number_format($totalSum / 100, 2, '.', ' ') . " {$currency}";
-            $text .= "\nИтого: <b>{$formattedTotal}</b>";
+            return;
         }
 
-        $prev = $date->copy()->subMonth();
-        $next = $date->copy()->addMonth();
-        $now = now();
+        $payments = $wallet->recurringPayments()->where('is_active', true)->orderBy('day_of_month')->get();
 
-        $buttons = [];
+        if ($payments->isEmpty()) {
+            $this->chat->html("🔁 Регулярных платежей нет.\n\nДобавить: <code>/regular 850 Аренда 1</code>\n(сумма, описание, день месяца)")->send();
 
-        $buttons[] = Button::make('⬅️ ' . mb_convert_case($prev->translatedFormat('M'), MB_CASE_TITLE, 'UTF-8'))
-            ->action('changeStoresMonth')
-            ->param('y', $prev->year)
-            ->param('m', $prev->month);
-
-        if ($date->format('Y-m') !== $now->format('Y-m')) {
-            $buttons[] = Button::make(mb_convert_case($next->translatedFormat('M'), MB_CASE_TITLE, 'UTF-8') . ' ➡️')
-                ->action('changeStoresMonth')
-                ->param('y', $next->year)
-                ->param('m', $next->month);
+            return;
         }
 
-        $keyboard = Keyboard::make()->row($buttons);
+        $text = "🔁 <b>Регулярные платежи</b>\n\n";
+        $keyboard = Keyboard::make();
 
-        return [
-            'text' => $text,
-            'keyboard' => $keyboard
-        ];
+        foreach ($payments as $payment) {
+            $text .= $payment->day_of_month.'-го · '.Html::e($payment->description).' — <b>'.Money::format($payment->amount, $wallet->currencySign())."</b>\n";
+            $keyboard = $keyboard->row([Button::make('🗑 '.$payment->description)->action('regDel')->param('id', $payment->id)]);
+        }
+
+        $text .= "\nВ месяц: <b>".Money::format($payments->sum('amount'), $wallet->currencySign()).'</b>';
+
+        $this->chat->html($text)->keyboard($keyboard)->send();
     }
 
-    public function invite(): void
+    /** /export — current month, /export 2026-10 — given month */
+    public function export(string $parameter = ''): void
     {
-        if (!$this->isUserAllowed()) {
-            $this->rejectAccess();
+        $wallet = $this->wallet();
+        if ($wallet === null) {
             return;
         }
 
-        $user = User::where('telegram_id', $this->message?->from()?->id())->first();
+        $month = preg_match('/^(\d{4})-(\d{1,2})$/', trim($parameter), $m)
+            ? Carbon::create((int) $m[1], (int) $m[2], 1)
+            : now();
 
-        if (!$user || !$user->current_wallet_id) {
-            $this->chat->html("Сначала отправь /start!")->send();
-            return;
+        $path = app(CsvExporter::class)->month($wallet, $month);
+
+        try {
+            $this->chat->document($path, 'budget-'.$month->format('Y-m').'.csv')
+                ->html('📤 Выгрузка за '.Messages::monthName($month))
+                ->send();
+        } finally {
+            @unlink($path);
         }
-
-        $token = base64_encode($user->current_wallet_id);
-
-        $this->chat->html("🔗 <b>Приглашение в семью</b>\n\nПерешли это сообщение тому, с кем хочешь вести общий бюджет. \nВторому человеку нужно запустить этого же бота и отправить ему команду:\n\n<code>/join {$token}</code>")->send();
-    }
-
-    public function join(): void
-    {
-
-        if (!$this->isUserAllowed()) {
-            $this->rejectAccess();
-            return;
-        }
-        $text = $this->message?->text();
-        $token = trim(str_replace('/join', '', $text));
-
-        if (empty($token)) {
-            $this->chat->html("Не вижу кода приглашения! Убедись, что скопировал команду целиком.")->send();
-            return;
-        }
-
-        $walletId = base64_decode($token);
-        $wallet = Wallet::find($walletId);
-
-        if (!$wallet) {
-            $this->chat->html("Кошелек не найден или код неверный 😔")->send();
-            return;
-        }
-
-        $telegramId = $this->message?->from()?->id();
-        $firstName = $this->message?->from()?->firstName() ?? 'Пользователь';
-
-        $user = User::firstOrCreate(
-            ['telegram_id' => $telegramId],
-            [
-                'name' => $firstName,
-                'email' => $telegramId . '@telegram.bot',
-                'password' => bcrypt(Str::random(16)),
-            ]
-        );
-
-        if (!$user->wallets()->where('wallet_id', $wallet->id)->exists()) {
-            $user->wallets()->attach($wallet->id, ['role' => 'member']);
-        }
-
-        $user->current_wallet_id = $wallet->id;
-        $user->save();
-
-        $this->chat->html("🎉 Ура, <b>{$firstName}</b>! Теперь ты подключен к кошельку <b>{$wallet->name}</b>. Все ваши траты теперь общие!")->send();
     }
 
     public function undo(): void
     {
-        if (!$this->isUserAllowed()) {
-            $this->rejectAccess();
+        $wallet = $this->wallet();
+        if ($wallet === null) {
             return;
         }
 
-        $user = User::where('telegram_id', $this->message?->from()?->id())->first();
+        $last = $this->user->transactions()->where('wallet_id', $wallet->id)->latest('id')->first();
 
-        if (!$user || !$user->current_wallet_id) {
-            $this->chat->html("Сначала отправь /start!")->send();
+        if ($last === null) {
+            $this->chat->html('Не нашёл твоих записей 🤷')->send();
+
             return;
         }
 
-        $lastTransaction = $user->transactions()
-            ->where('wallet_id', $user->current_wallet_id)
-            ->latest('id')
-            ->first();
-
-        if (!$lastTransaction) {
-            $this->chat->html("Упс, не нашел ни одной твоей операции для отмены. 🤷‍♂️")->send();
-            return;
-        }
-
-        $amount = number_format($lastTransaction->amount / 100, 2, '.', ' ');
-        $description = $lastTransaction->description;
-
-        $this->chat->html("⚠️ <b>Подтверди действие</b>\n\nТы точно хочешь удалить эту запись?\n💰 Сумма: <b>{$amount}</b>\n📝 Описание: <i>{$description}</i>")
-            ->keyboard(Keyboard::make()->buttons([
-                Button::make('✅ Да, удалить')->action('confirmUndo')->param('id', $lastTransaction->id),
-                Button::make('❌ Отмена')->action('cancelUndo'),
-            ]))->send();
+        $batch = $this->ownBatch($last->batch_id);
+        $this->chat->html($this->deletePrompt($wallet, $batch))->keyboard(Keyboards::confirmDelete($last->batch_id))->send();
     }
 
-    public function confirmUndo(): void
+    public function invite(): void
     {
-        if (!$this->isUserAllowed()) {
-            $this->rejectAccess();
+        $wallet = $this->wallet();
+        if ($wallet === null) {
             return;
         }
 
-        $transactionId = $this->data->get('id');
-        $batchId = $this->data->get('batch_id');
+        $invite = app(WalletService::class)->createInvite($wallet, $this->user);
 
-        if ($batchId) {
-            $deletedCount = \App\Models\Transaction::where('ai_metadata->batch_id', $batchId)->delete();
-            if ($deletedCount > 0) {
-                $this->chat->edit($this->messageId)->html("🗑 <b>Весь чек ({$deletedCount} позиций) успешно удален!</b>")->send();
-            } else {
-                $this->chat->edit($this->messageId)->html("🤷‍♂️ Записи не найдены (возможно, уже удалены).")->send();
-            }
-        } elseif ($transactionId) {
-            $transaction = \App\Models\Transaction::find($transactionId);
-            if ($transaction) {
-                $transaction->delete();
-                $this->chat->edit($this->messageId)->html("🗑 <b>Операция успешно удалена!</b>")->send();
-            } else {
-                $this->chat->edit($this->messageId)->html("🤷‍♂️ Запись не найдена.")->send();
-            }
-        }
+        $this->chat->html(
+            '🔗 <b>Приглашение в «'.Html::e($wallet->name)."»</b>\n\n"
+            ."Перешли это сообщение. Второму человеку нужно открыть бота и отправить:\n\n"
+            ."<code>/join {$invite->code}</code>\n\n"
+            .'Код одноразовый, действует '.config('budget.invite_ttl_hours').' ч.'
+        )->send();
     }
 
-    public function cancelUndo(): void
+    public function join(string $parameter = ''): void
     {
-        if (!$this->isUserAllowed()) {
-            $this->rejectAccess();
+        if (trim($parameter) === '') {
+            $this->chat->html('Отправь команду вместе с кодом: <code>/join КОД</code>')->send();
+
             return;
         }
 
-        $this->chat->edit($this->messageId)->html("🛡 Действие отменено. Запись оставлена в бюджете.")->send();
+        $this->user ??= User::fromTelegram($this->from->id(), $this->from->firstName() ?: 'Пользователь');
+        $wallet = app(WalletService::class)->redeemInvite($parameter, $this->user);
+
+        if ($wallet === null) {
+            $this->chat->html('Код неверный, уже использован или истёк 😔 Попроси новый через /invite')->send();
+
+            return;
+        }
+
+        $this->chat->html('🎉 Готово, <b>'.Html::e($this->user->name).'</b>! Теперь вы ведёте общий бюджет «'.Html::e($wallet->name).'».')->send();
     }
 
     public function currency(): void
     {
-        if (!$this->isUserAllowed()) {
-            $this->rejectAccess();
-            return;
-        }
-
-        $user = User::where('telegram_id', $this->message?->from()?->id())->first();
-
-        if (!$user || !$user->current_wallet_id) {
-            $this->chat->html("Сначала отправь /start!")->send();
-            return;
-        }
-
-        $this->chat->html("Выберите валюту для вашего кошелька:")
-            ->keyboard(Keyboard::make()->buttons([
-                Button::make('€ Евро')->action('setCurrency')->param('c', '€'),
-                Button::make('$ Доллар')->action('setCurrency')->param('c', '$'),
-                Button::make('₽ Рубль')->action('setCurrency')->param('c', '₽'),
-                Button::make('сом Сом')->action('setCurrency')->param('c', 'сом'),
-            ]))->send();
-    }
-
-    public function setCurrency(): void
-    {
-        if (!$this->isUserAllowed()) {
-            $this->rejectAccess();
-            return;
-        }
-
-        $currencySign = $this->data->get('c');
-        $user = User::where('telegram_id', $this->chat->chat_id)->first();
-
-        if ($user && $user->current_wallet_id) {
-            Wallet::where('id', $user->current_wallet_id)->update(['currency' => $currencySign]);
-            $this->chat->edit($this->messageId)->html("✅ Валюта кошелька успешно изменена на <b>{$currencySign}</b>")->send();
+        if ($this->wallet()) {
+            $this->chat->html('Выбери валюту кошелька:')->keyboard(Keyboards::currencies())->send();
         }
     }
 
-    /**
-     * Обработка обычных текстовых сообщений
-     */
-    protected function handleChatMessage(\Illuminate\Support\Stringable $text): void
+    public function web(): void
     {
-        $user = \App\Models\User::where('telegram_id', $this->message?->from()?->id())->first();
-
-        if (!$user || !$user->current_wallet_id) {
-            $this->chat->html("Сначала отправь /start, чтобы я настроил твой профиль!")->send();
+        if ($this->wallet() === null) {
             return;
         }
 
-        $this->chat->html("Анализируем... ")->send();
+        $minutes = config('budget.web_login_ttl_minutes');
+        $url = URL::temporarySignedRoute('login.telegram', now()->addMinutes($minutes), ['user' => $this->user->id, 'nonce' => Str::random(32)]);
 
-        \App\Jobs\ParseTextJob::dispatch($user->id, $this->chat->id, $text->value());
+        $this->chat->html("🔐 Вход в веб-панель (ссылка действует {$minutes} мин, никому не пересылай):")
+            ->keyboard(Keyboard::make()->buttons([Button::make('Открыть панель')->url($url)]))
+            ->send();
     }
 
-    protected function handleVoiceMessage(User $user, string $fileId): void
+    // ---------------------------------------------------------------- buttons
+
+    public function pay(string $b = '', string $m = ''): void
     {
-        $token = $this->bot->token;
+        $batch = $this->isCallback() ? $this->ownBatch($b) : collect();
 
-        $fileInfoResponse = Http::get("https://api.telegram.org/bot{$token}/getFile", [
-            'file_id' => $fileId
-        ]);
+        if ($batch->isEmpty() || ! in_array($m, ['cash', 'card'], true)) {
+            $this->reply('Запись не найдена');
 
-        if (! $fileInfoResponse->successful()) {
-            $this->chat->html('Не удалось загрузить голосовое сообщение.')->send();
             return;
         }
 
-        $filePath = $fileInfoResponse->json('result.file_path');
+        Transaction::whereKey($batch->modelKeys())->update(['payment_method' => $m]);
 
-        $downloadUrl = "https://api.telegram.org/file/bot{$token}/{$filePath}";
-        $fileContent = Http::get($downloadUrl)->body();
-
-        $fileName = 'voice_' . Str::random(10) . '.ogg';
-        $localPath = "temp/{$fileName}";
-        Storage::disk('local')->put($localPath, $fileContent);
-
-        $absolutePath = Storage::disk('local')->path($localPath);
-
-        \App\Jobs\ParseVoiceJob::dispatch($user->id, (string)$this->chat->id, $absolutePath);
-
-        $this->chat->html('Голосовое сообщение принято! Расшифровываем...')->send();
+        $this->replaceKeyboard(Keyboards::afterRecord($b, false));
+        $this->reply($m === 'cash' ? '💵 Наличными' : '💳 Картой');
     }
 
-    /**
-     * Обработчик нажатия на кнопки выбора способа оплаты
-     */
-    public function updatePayment(): void
+    public function del(string $b = ''): void
     {
-        if (!$this->isUserAllowed()) {
-            $this->rejectAccess();
+        $batch = $this->isCallback() ? $this->ownBatch($b) : collect();
+
+        if ($batch->isEmpty()) {
+            $this->reply('Запись уже удалена');
+
             return;
         }
 
-        $method = $this->data->get('method');
-        $cacheKey = $this->data->get('key');
-        $ids = \Illuminate\Support\Facades\Cache::get($cacheKey);
+        $this->chat->html($this->deletePrompt($batch->first()->wallet, $batch))->keyboard(Keyboards::confirmDelete($b))->send();
+        $this->reply('');
+    }
 
-        if (!$ids) {
-            $this->chat->html("❌ Время ожидания истекло или способ оплаты уже был выбран.")->send();
-            $this->deleteKeyboard();
+    public function delOk(string $b = ''): void
+    {
+        $batch = $this->isCallback() ? $this->ownBatch($b) : collect();
+
+        if ($batch->isEmpty()) {
+            $this->chat->edit($this->messageId)->html('🤷 Записи не найдены (возможно, уже удалены).')->send();
+
             return;
         }
 
-        \App\Models\Transaction::whereIn('id', $ids)->update(['payment_method' => $method]);
-        \Illuminate\Support\Facades\Cache::forget($cacheKey);
-        $methodName = $method === 'cash' ? '💵 Наличными' : '💳 Картой';
-        $this->deleteKeyboard();
-        $this->chat->html("✅ Отлично! Способ оплаты обновлен на: <b>{$methodName}</b>")->send();
+        Transaction::whereKey($batch->modelKeys())->delete();
+
+        $this->chat->edit($this->messageId)->html($batch->count() > 1
+            ? "🗑 <b>Удалено {$batch->count()} позиций</b>"
+            : '🗑 <b>Запись удалена</b>')->send();
+    }
+
+    public function delNo(): void
+    {
+        if ($this->isCallback()) {
+            $this->chat->edit($this->messageId)->html('🛡 Отменено, запись осталась.')->send();
+        }
+    }
+
+    public function rep(int $y = 0, int $m = 0): void
+    {
+        if ($this->isCallback() && ($wallet = $this->wallet()) && $month = $this->validMonth($y, $m)) {
+            $this->sendMonthly('rep', $wallet, $month, edit: true);
+        }
+    }
+
+    public function sto(int $y = 0, int $m = 0): void
+    {
+        if ($this->isCallback() && ($wallet = $this->wallet()) && $month = $this->validMonth($y, $m)) {
+            $this->sendMonthly('sto', $wallet, $month, edit: true);
+        }
+    }
+
+    public function cur(string $c = ''): void
+    {
+        $wallet = $this->isCallback() ? $this->wallet() : null;
+
+        if ($wallet === null || ! in_array($c, config('budget.currencies'), true)) {
+            return;
+        }
+
+        $wallet->update(['currency' => $c]);
+        $this->chat->edit($this->messageId)->html('✅ Валюта кошелька: <b>'.Html::e($c).'</b>')->send();
+    }
+
+    public function regDel(int $id = 0): void
+    {
+        $wallet = $this->isCallback() ? $this->wallet() : null;
+        $payment = $wallet?->recurringPayments()->whereKey($id)->first();
+
+        if ($payment === null) {
+            $this->reply('Платёж не найден');
+
+            return;
+        }
+
+        $payment->update(['is_active' => false]);
+        $this->chat->edit($this->messageId)->html('🗑 Регулярный платёж «'.Html::e($payment->description).'» отключён.')->send();
+    }
+
+    // ---------------------------------------------------------------- helpers
+
+    private function sendMonthly(string $action, Wallet $wallet, Carbon $month, bool $edit = false): void
+    {
+        $reports = app(ReportService::class);
+
+        $text = $action === 'rep'
+            ? Messages::monthReport($wallet, $month, $reports->month($wallet, $month))
+            : Messages::storesReport($wallet, $month, $reports->stores($wallet, $month));
+
+        $telegraph = $edit ? $this->chat->edit($this->messageId) : $this->chat;
+        $telegraph->html($text)->keyboard(Keyboards::monthPager($action, $month))->send();
+    }
+
+    private function validMonth(int $year, int $month): ?Carbon
+    {
+        if ($year < 2000 || $month < 1 || $month > 12) {
+            return null;
+        }
+
+        $date = Carbon::create($year, $month, 1);
+
+        return $date->isAfter(now()) ? null : $date;
+    }
+
+    /** @param Collection<int, Transaction> $batch */
+    private function deletePrompt(Wallet $wallet, Collection $batch): string
+    {
+        $first = $batch->first();
+        $title = $batch->count() > 1
+            ? 'весь чек'.($first->store ? ' «'.Html::e($first->store).'»' : '')." ({$batch->count()} поз.)"
+            : '«'.Html::e($first->description).'»';
+
+        return "⚠️ <b>Удалить {$title}?</b>\n💰 ".Money::format((int) $batch->sum('amount'), $wallet->currencySign());
+    }
+
+    private function findCategory(Wallet $wallet, string $name): ?Category
+    {
+        $needle = mb_strtolower($name);
+
+        return $wallet->categories()->get()
+            ->sortBy(fn (Category $c) => mb_strtolower($c->name) === $needle ? 0 : 1)
+            ->first(fn (Category $c) => str_contains(mb_strtolower($c->name), $needle));
     }
 }

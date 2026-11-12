@@ -2,34 +2,40 @@
 
 namespace App\Console\Commands;
 
-use Illuminate\Console\Command;
 use DefStudio\Telegraph\Models\TelegraphBot;
+use Illuminate\Console\Command;
 
 class SetupBotCommands extends Command
 {
     protected $signature = 'bot:setup-commands';
 
-    protected $description = 'Регистрирует команды меню для Telegram-бота';
+    protected $description = 'Registers the bot command menu in Telegram';
 
-    public function handle()
+    public function handle(): int
     {
         $bot = TelegraphBot::first();
 
-        if (!$bot) {
-            $this->error('Бот не найден в базе данных! Убедись, что выполнил миграции и создал бота.');
-            return;
+        if (! $bot) {
+            $this->error('Бот не найден. Создай его: php artisan telegraph:new-bot');
+
+            return self::FAILURE;
         }
 
-        $this->info('Отправляем запрос в Telegram API...');
-
         $bot->registerCommands([
-            'start'  => 'Настроить профиль',
-            'report' => 'Отчет за месяц',
-            'stores' => 'Отчет по магазинам',
-            'invite' => 'Пригласить в семью',
-            'undo'   => 'Отменить последнюю запись',
+            'report' => 'Отчёт за месяц',
+            'stores' => 'Траты по магазинам',
+            'limits' => 'Лимиты на месяц',
+            'regular' => 'Регулярные платежи',
+            'export' => 'Выгрузка в CSV',
+            'undo' => 'Удалить последнюю запись',
+            'invite' => 'Пригласить в общий бюджет',
+            'currency' => 'Валюта кошелька',
+            'web' => 'Вход в веб-панель',
+            'help' => 'Подсказка',
         ])->send();
 
-        $this->info('✅ Меню бота успешно обновлено!');
+        $this->info('✅ Меню бота обновлено');
+
+        return self::SUCCESS;
     }
 }

@@ -35,7 +35,14 @@ return [
         ],
     ],
 
-    'telegram' => [
-        'allowed_users' => explode(',', env('ALLOWED_TELEGRAM_USERS', '')),
+    'gemini' => [
+        'key' => env('GEMINI_API_KEY'),
+        'model' => env('GEMINI_MODEL', 'gemini-3.5-flash-lite'),
+        'timeout' => (int) env('GEMINI_TIMEOUT', 45),
+    ],
+
+    'whisper' => [
+        'url' => env('WHISPER_URL', 'http://whisper:9000'),
+        'timeout' => (int) env('WHISPER_TIMEOUT', 60),
     ],
 ];
