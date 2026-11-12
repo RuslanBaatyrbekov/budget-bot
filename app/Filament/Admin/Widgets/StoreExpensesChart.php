@@ -2,58 +2,28 @@
 
 namespace App\Filament\Admin\Widgets;
 
-use App\Models\Transaction;
-use App\Models\Wallet;
+use App\Services\ReportService;
+use App\Support\ActiveWallet;
 use Filament\Widgets\ChartWidget;
-use Illuminate\Support\Carbon;
 
 class StoreExpensesChart extends ChartWidget
 {
-    protected static ?string $heading = 'Траты по магазинам (за месяц)';
+    protected static ?string $heading = 'Траты по магазинам (этот месяц)';
 
-    protected static ?int $sort = 2;
+    protected static ?int $sort = 4;
 
     protected function getData(): array
     {
-        $walletId = session('active_wallet_id') ?? auth()->user()?->current_wallet_id;
-        $startOfMonth = Carbon::now()->startOfMonth();
-
-        $transactions = Transaction::where('wallet_id', $walletId)
-            ->where('type', 'expense')
-            ->where('purchased_at', '>=', $startOfMonth)
-            ->get();
-
-        $storeTotals = [];
-
-        foreach ($transactions as $transaction) {
-            $metadata = is_array($transaction->ai_metadata)
-                ? $transaction->ai_metadata
-                : json_decode($transaction->ai_metadata ?? '{}', true);
-
-            $store = $metadata['store'] ?? $metadata['store_name'] ?? 'Разное / Вручную';
-
-            if (!isset($storeTotals[$store])) {
-                $storeTotals[$store] = 0;
-            }
-
-            $storeTotals[$store] += $transaction->amount / 100;
-        }
-
-        arsort($storeTotals);
+        $wallet = ActiveWallet::get();
+        $stores = $wallet ? app(ReportService::class)->stores($wallet, now())->take(12) : collect();
 
         return [
-            'datasets' => [
-                [
-                    'label' => 'Потрачено',
-                    'data' => array_values($storeTotals),
-                    'backgroundColor' => [
-                        '#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6',
-                        '#06b6d4', '#f43f5e', '#84cc16', '#64748b', '#14b8a6',
-                        '#d946ef', '#0ea5e9', '#eab308', '#22c55e', '#f97316'
-                    ],
-                ],
-            ],
-            'labels' => array_keys($storeTotals),
+            'datasets' => [[
+                'label' => 'Потрачено',
+                'data' => $stores->map(fn ($row) => $row->total / 100)->all(),
+                'backgroundColor' => '#3b82f6',
+            ]],
+            'labels' => $stores->pluck('store')->all(),
         ];
     }
 

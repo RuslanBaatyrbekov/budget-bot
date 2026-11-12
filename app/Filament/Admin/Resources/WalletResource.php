@@ -3,65 +3,57 @@
 namespace App\Filament\Admin\Resources;
 
 use App\Filament\Admin\Resources\WalletResource\Pages;
-use App\Filament\Admin\Resources\WalletResource\RelationManagers;
 use App\Models\Wallet;
+use App\Support\ActiveWallet;
 use Filament\Forms;
 use Filament\Forms\Form;
 use Filament\Resources\Resource;
 use Filament\Tables;
 use Filament\Tables\Table;
 use Illuminate\Database\Eloquent\Builder;
-use Illuminate\Database\Eloquent\SoftDeletingScope;
 
 class WalletResource extends Resource
 {
     protected static ?string $model = Wallet::class;
 
-    protected static ?string $navigationIcon = 'heroicon-o-rectangle-stack';
+    protected static ?string $navigationIcon = 'heroicon-o-wallet';
+
+    protected static ?string $modelLabel = 'кошелёк';
+
+    protected static ?string $pluralModelLabel = 'Кошельки';
+
+    protected static ?int $navigationSort = 3;
+
+    public static function getEloquentQuery(): Builder
+    {
+        return parent::getEloquentQuery()->whereKey(ActiveWallet::ids());
+    }
 
     public static function form(Form $form): Form
     {
-        return $form
-            ->schema([
-                Forms\Components\TextInput::make('name')
-                    ->required()
-                    ->maxLength(255),
-            ]);
+        return $form->schema([
+            Forms\Components\TextInput::make('name')->label('Название')->required()->maxLength(255),
+            Forms\Components\Select::make('currency')
+                ->label('Валюта')
+                ->options(collect(config('budget.currencies'))->mapWithKeys(fn ($c) => [$c => $c]))
+                ->default(config('budget.default_currency'))
+                ->required(),
+        ]);
     }
 
     public static function table(Table $table): Table
     {
         return $table
+            ->modifyQueryUsing(fn (Builder $query) => $query->with('users')->withCount('transactions'))
             ->columns([
-                Tables\Columns\TextColumn::make('name')
-                    ->searchable(),
-                Tables\Columns\TextColumn::make('created_at')
-                    ->dateTime()
-                    ->sortable()
-                    ->toggleable(isToggledHiddenByDefault: true),
-                Tables\Columns\TextColumn::make('updated_at')
-                    ->dateTime()
-                    ->sortable()
-                    ->toggleable(isToggledHiddenByDefault: true),
-            ])
-            ->filters([
-                //
+                Tables\Columns\TextColumn::make('name')->label('Название')->searchable(),
+                Tables\Columns\TextColumn::make('currency')->label('Валюта'),
+                Tables\Columns\TextColumn::make('users.name')->label('Участники')->badge(),
+                Tables\Columns\TextColumn::make('transactions_count')->label('Записей'),
             ])
             ->actions([
                 Tables\Actions\EditAction::make(),
-            ])
-            ->bulkActions([
-                Tables\Actions\BulkActionGroup::make([
-                    Tables\Actions\DeleteBulkAction::make(),
-                ]),
             ]);
-    }
-
-    public static function getRelations(): array
-    {
-        return [
-            //
-        ];
     }
 
     public static function getPages(): array

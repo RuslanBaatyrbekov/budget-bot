@@ -2,58 +2,52 @@
 
 namespace App\Filament\Admin\Widgets;
 
-use App\Models\Transaction;
+use App\Services\ReportService;
+use App\Support\ActiveWallet;
 use Filament\Widgets\ChartWidget;
-use Filament\Support\RawJs;
-use Illuminate\Support\Carbon;
-use Illuminate\Support\Facades\DB;
 
 class ExpensesByCategoryChart extends ChartWidget
 {
     protected static ?string $heading = 'Траты по категориям';
-    protected static ?int $sort = 3;
+
+    protected static ?int $sort = 2;
+
+    public ?string $filter = 'month';
 
     protected function getFilters(): ?array
     {
         return [
             'week' => 'За неделю',
-            'month' => 'За месяц',
+            'month' => 'Этот месяц',
+            'prev' => 'Прошлый месяц',
             'year' => 'За год',
         ];
     }
 
     protected function getData(): array
     {
-        $walletId = session('active_wallet_id') ?? auth()->user()?->current_wallet_id;
-        $activeFilter = $this->filter;
+        $wallet = ActiveWallet::get();
 
-        $startDate = match ($activeFilter) {
-            'week' => Carbon::today()->subDays(7),
-            'year' => Carbon::today()->subYear(),
-            default => Carbon::today()->subMonth(),
+        if ($wallet === null) {
+            return ['datasets' => [], 'labels' => []];
+        }
+
+        [$from, $to] = match ($this->filter) {
+            'week' => [now()->subDays(6)->startOfDay(), now()],
+            'prev' => [now()->subMonthNoOverflow()->startOfMonth(), now()->subMonthNoOverflow()->endOfMonth()],
+            'year' => [now()->subMonths(11)->startOfMonth(), now()],
+            default => [now()->startOfMonth(), now()->endOfMonth()],
         };
 
-        $transactions = Transaction::with('category')
-            ->where('wallet_id', $walletId)
-            ->where('created_at', '>=', $startDate)
-            ->select('category_id', DB::raw('SUM(amount) as total'))
-            ->groupBy('category_id')
-            ->get();
-
-        $labels = $transactions->map(fn ($t) => $t->category->name ?? 'Без категории')->toArray();
-        $data = $transactions->map(fn ($t) => $t->total / 100)->toArray();
+        $categories = app(ReportService::class)->period($wallet, $from, $to)['categories'];
 
         return [
-            'datasets' => [
-                [
-                    'label' => 'Сумма',
-                    'data' => $data,
-                    'backgroundColor' => [
-                        '#ef4444', '#f97316', '#eab308', '#22c55e', '#3b82f6', '#8b5cf6', '#ec4899',
-                    ],
-                ],
-            ],
-            'labels' => $labels,
+            'datasets' => [[
+                'label' => 'Сумма',
+                'data' => $categories->map(fn ($row) => $row->total / 100)->all(),
+                'backgroundColor' => ['#ef4444', '#f97316', '#eab308', '#22c55e', '#06b6d4', '#3b82f6', '#8b5cf6', '#ec4899', '#64748b', '#14b8a6', '#d946ef', '#84cc16'],
+            ]],
+            'labels' => $categories->map(fn ($row) => trim(($row->icon ?? '').' '.$row->name))->all(),
         ];
     }
 
@@ -64,11 +58,6 @@ class ExpensesByCategoryChart extends ChartWidget
 
     protected function getOptions(): array
     {
-        return [
-            'scales' => [
-                'x' => ['display' => false],
-                'y' => ['display' => false],
-            ],
-        ];
+        return ['scales' => ['x' => ['display' => false], 'y' => ['display' => false]]];
     }
 }
