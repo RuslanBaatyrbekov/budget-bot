@@ -190,4 +190,18 @@ class BotWebhookTest extends TestCase
 
         Telegraph::assertSent('Итоги недели', exact: false);
     }
+
+    public function test_month_navigation_and_currency_buttons(): void
+    {
+        [, $wallet] = $this->family();
+
+        $this->webhook($this->callbackUpdate('action:rep;y:2026;m:10'));
+        Telegraph::assertSentData(\DefStudio\Telegraph\Telegraph::ENDPOINT_EDIT_MESSAGE, ['text' => 'Октябрь 2026'], exact: false);
+
+        $this->webhook($this->callbackUpdate('action:cur;c:$'));
+        $this->assertSame('$', $wallet->fresh()->currency);
+
+        $this->webhook($this->callbackUpdate('action:cur;c:BTC'));
+        $this->assertSame('$', $wallet->fresh()->currency);
+    }
 }
